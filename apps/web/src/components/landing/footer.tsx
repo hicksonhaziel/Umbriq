@@ -9,8 +9,8 @@ export function Footer() {
             <Image
               src="/brand/icon.png"
               alt="Umbriq logo"
-              width={24}
-              height={24}
+              width={40}
+              height={40}
               className="rounded"
             />
             <span className="text-lg font-bold text-white">Umbriq</span>

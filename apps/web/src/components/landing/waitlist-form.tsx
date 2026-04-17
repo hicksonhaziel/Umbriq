@@ -28,19 +28,6 @@ export function WaitlistForm() {
       </div>
 
       <div className="flex flex-col gap-1.5">
-        <label className="text-sm text-[#bbcac6]" htmlFor="company">
-          Company Name
-        </label>
-        <input
-          required
-          id="company"
-          type="text"
-          placeholder="Institution Name"
-          className="w-full rounded-[10px] border border-transparent bg-[#0a0e13] px-4 py-3 text-sm text-white placeholder:text-slate-600 outline-none transition focus:border-[#14b8a6]"
-        />
-      </div>
-
-      <div className="flex flex-col gap-1.5">
         <label className="text-sm text-[#bbcac6]" htmlFor="role">
           Role
         </label>

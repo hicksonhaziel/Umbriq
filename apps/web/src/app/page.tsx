@@ -128,13 +128,7 @@ export default function Home() {
             <div className="absolute -inset-4 rounded-full bg-[#14b8a6]/20 blur-[100px]" />
             <div className="relative rounded-xl border border-[#3c4947]/40 bg-[#31353b]/40 p-8 backdrop-blur-xl">
               <div className="mb-8">
-                <Image
-                  src="/brand/covericon.png"
-                  alt="Umbriq platform preview"
-                  width={1536}
-                  height={483}
-                  className="mb-6 h-auto w-full rounded-lg border border-[#31353b] shadow-lg"
-                />
+                
                 <h3 className="mb-2 text-xl font-bold text-white">Secure Your Allocation</h3>
                 <p className="text-sm text-[#bbcac6]">
                   Join the waitlist for priority onboarding and early API access.

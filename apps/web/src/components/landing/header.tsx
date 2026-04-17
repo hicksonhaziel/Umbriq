@@ -8,8 +8,8 @@ export function Header() {
           <Image
             src="/brand/icon.png"
             alt="Umbriq logo"
-            width={32}
-            height={32}
+            width={45}
+            height={45}
             className="rounded"
             priority
           />
