@@ -42,12 +42,23 @@ export async function POST(request: Request) {
     );
   }
 
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const supabaseUrl =
+    process.env.SUPABASE_URL ??
+    process.env.NEXT_PUBLIC_SUPABASE_URL ??
+    process.env.SUPABASE_PROJECT_URL;
+  const supabaseServiceRoleKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ??
+    process.env.SUPABASE_SECRET_KEY ??
+    process.env.SUPABASE_SERVICE_KEY;
 
   if (!supabaseUrl || !supabaseServiceRoleKey) {
+    const missing = [
+      !supabaseUrl ? "SUPABASE_URL" : null,
+      !supabaseServiceRoleKey ? "SUPABASE_SERVICE_ROLE_KEY" : null,
+    ].filter(Boolean);
+
     return NextResponse.json(
-      { error: "Server is missing Supabase configuration." },
+      { error: `Server is missing Supabase configuration: ${missing.join(", ")}.` },
       { status: 500 }
     );
   }
