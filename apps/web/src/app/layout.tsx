@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import "@solana/wallet-adapter-react-ui/styles.css";
 
 export const metadata: Metadata = {
   title: "Umbriq | Private RFQ Execution on Solana",
