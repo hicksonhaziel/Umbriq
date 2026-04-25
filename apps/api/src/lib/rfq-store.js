@@ -79,6 +79,34 @@ class InMemoryRfqStore {
     return { ...record };
   }
 
+  async listByInstitutionWallet(institutionWallet, options = {}) {
+    const pairFilter =
+      typeof options.pair === "string" && options.pair.trim().length > 0
+        ? options.pair.trim().toUpperCase()
+        : null;
+    const sideFilter =
+      typeof options.side === "string" && options.side.trim().length > 0
+        ? options.side.trim()
+        : null;
+
+    const rows = [];
+    for (const record of this.records.values()) {
+      if (record.institutionWallet !== institutionWallet) {
+        continue;
+      }
+      if (pairFilter && record.pair !== pairFilter) {
+        continue;
+      }
+      if (sideFilter && record.side !== sideFilter) {
+        continue;
+      }
+      rows.push({ ...record });
+    }
+
+    rows.sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+    return rows;
+  }
+
   async close() {}
 }
 
@@ -182,6 +210,45 @@ class PostgresRfqStore {
       return null;
     }
     return mapRfqRow(result.rows[0]);
+  }
+
+  async listByInstitutionWallet(institutionWallet, options = {}) {
+    const conditions = ["institution_wallet = $1"];
+    const values = [institutionWallet];
+    let index = values.length + 1;
+
+    if (typeof options.pair === "string" && options.pair.trim().length > 0) {
+      conditions.push(`pair = $${index}`);
+      values.push(options.pair.trim().toUpperCase());
+      index += 1;
+    }
+
+    if (typeof options.side === "string" && options.side.trim().length > 0) {
+      conditions.push(`side = $${index}`);
+      values.push(options.side.trim());
+      index += 1;
+    }
+
+    const query = `
+      SELECT
+        id,
+        institution_wallet AS "institutionWallet",
+        pair,
+        side,
+        notional_size::text AS "notionalSize",
+        min_fill_size::text AS "minFillSize",
+        quote_expires_at AS "quoteExpiresAt",
+        status,
+        encrypted_payload AS "encryptedPayload",
+        counterparties AS "counterparties",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM rfqs
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY created_at DESC
+    `;
+    const result = await this.pool.query(query, values);
+    return result.rows.map(mapRfqRow);
   }
 
   async close() {

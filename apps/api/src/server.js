@@ -289,6 +289,38 @@ async function buildServer(options = {}) {
     }
   });
 
+  app.get("/rfqs", { preHandler: authenticate }, async (request, reply) => {
+    if (request.session.role !== "institution") {
+      return reply.code(403).send({
+        error: "Only institution role can view institution RFQ list",
+      });
+    }
+
+    await quoteExpiryService.sweepOnce();
+
+    const pair =
+      typeof request.query?.pair === "string" ? request.query.pair : undefined;
+    const side =
+      typeof request.query?.side === "string" ? request.query.side : undefined;
+
+    const rfqs = await rfqStore.listByInstitutionWallet(request.session.walletAddress, {
+      pair,
+      side,
+    });
+
+    const countsByRfqId = await quoteStore.getActiveCountByRfqIds(
+      rfqs.map((rfq) => rfq.id)
+    );
+
+    return {
+      count: rfqs.length,
+      rfqs: rfqs.map((rfq) => ({
+        ...rfq,
+        activeQuoteCount: countsByRfqId[rfq.id] || 0,
+      })),
+    };
+  });
+
   app.post("/quotes", { preHandler: authenticate }, async (request, reply) => {
     if (request.session.role !== "market_maker") {
       return reply.code(403).send({

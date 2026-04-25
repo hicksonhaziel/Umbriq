@@ -89,6 +89,32 @@ class InMemoryQuoteStore {
     return quotes;
   }
 
+  async getActiveCountByRfqIds(rfqIds) {
+    if (!Array.isArray(rfqIds) || rfqIds.length === 0) {
+      return {};
+    }
+
+    const rfqIdSet = new Set(rfqIds);
+    const now = Date.now();
+    const counts = {};
+
+    for (const quote of this.byId.values()) {
+      if (!rfqIdSet.has(quote.rfqId)) {
+        continue;
+      }
+      if (!ACTIVE_STATUSES.has(quote.status)) {
+        continue;
+      }
+      if (Date.parse(quote.validUntil) <= now) {
+        continue;
+      }
+
+      counts[quote.rfqId] = (counts[quote.rfqId] || 0) + 1;
+    }
+
+    return counts;
+  }
+
   async expireByIds(quoteIds) {
     if (!Array.isArray(quoteIds) || quoteIds.length === 0) {
       return [];
@@ -199,6 +225,28 @@ class PostgresQuoteStore {
     `;
     const result = await this.pool.query(query, [rfqId]);
     return result.rows.map(mapQuoteRow);
+  }
+
+  async getActiveCountByRfqIds(rfqIds) {
+    if (!Array.isArray(rfqIds) || rfqIds.length === 0) {
+      return {};
+    }
+
+    const query = `
+      SELECT rfq_id AS "rfqId", COUNT(*)::int AS "count"
+      FROM quotes
+      WHERE rfq_id = ANY($1::uuid[])
+        AND status = 'active'
+        AND valid_until > NOW()
+      GROUP BY rfq_id
+    `;
+
+    const result = await this.pool.query(query, [rfqIds]);
+    const counts = {};
+    for (const row of result.rows) {
+      counts[row.rfqId] = Number(row.count) || 0;
+    }
+    return counts;
   }
 
   async expireByIds(quoteIds) {

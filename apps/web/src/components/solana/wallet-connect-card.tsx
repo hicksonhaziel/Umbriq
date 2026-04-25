@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
-import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { LAMPORTS_PER_SOL } from "@solana/web3.js";
 import bs58 from "bs58";
 import { initializeUmbraAccount, type UmbraAccountState } from "@/lib/umbra/client";
@@ -43,6 +43,25 @@ function toWebsocketBaseUrl(apiBaseUrl: string): string {
   return apiBaseUrl;
 }
 
+const WalletMultiButtonNoSsr = dynamic(
+  () =>
+    import("@solana/wallet-adapter-react-ui").then(
+      (module) => module.WalletMultiButton
+    ),
+  {
+    ssr: false,
+    loading: () => (
+      <button
+        type="button"
+        disabled
+        className="h-10 rounded-md bg-[#14b8a6] px-4 text-sm font-semibold text-[#05322d] opacity-70"
+      >
+        Select Wallet
+      </button>
+    ),
+  }
+);
+
 export function WalletConnectCard() {
   const { connection } = useConnection();
   const { connected, connecting, disconnect, publicKey, signMessage } = useWallet();
@@ -73,16 +92,9 @@ export function WalletConnectCard() {
   const [rfqCopyState, setRfqCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const [wsState, setWsState] = useState<WsConnectionState>("disconnected");
   const [wsEvents, setWsEvents] = useState<string[]>([]);
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
 
   useEffect(() => {
     if (!sessionToken) {
-      setWsState("disconnected");
-      setWsEvents([]);
       return;
     }
 
@@ -312,6 +324,8 @@ export function WalletConnectCard() {
       await Promise.all([fetchUmbraState(token), fetchDashboard(token)]);
     } catch (error) {
       setSessionToken(null);
+      setWsState("disconnected");
+      setWsEvents([]);
       setDashboardView(null);
       clearUmbraState();
       setAuthError(error instanceof Error ? error.message : "Authentication failed");
@@ -525,6 +539,8 @@ export function WalletConnectCard() {
       });
     } finally {
       setSessionToken(null);
+      setWsState("disconnected");
+      setWsEvents([]);
       setDashboardView(null);
       clearUmbraState();
     }
@@ -544,17 +560,7 @@ export function WalletConnectCard() {
             Step 1: Connect wallet and confirm balance
           </h3>
           <div className="mt-3 flex flex-wrap items-center gap-3">
-            {mounted ? (
-              <WalletMultiButton className="!h-10 !rounded-md !bg-[#14b8a6] !px-4 !text-sm !font-semibold !text-[#05322d] hover:!bg-[#0d9488]" />
-            ) : (
-              <button
-                type="button"
-                disabled
-                className="h-10 rounded-md bg-[#14b8a6] px-4 text-sm font-semibold text-[#05322d] opacity-70"
-              >
-                Select Wallet
-              </button>
-            )}
+            <WalletMultiButtonNoSsr className="!h-10 !rounded-md !bg-[#14b8a6] !px-4 !text-sm !font-semibold !text-[#05322d] hover:!bg-[#0d9488]" />
             <Button
               variant="outline"
               onClick={() => void disconnect()}
