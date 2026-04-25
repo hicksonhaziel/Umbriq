@@ -79,6 +79,16 @@ class InMemoryRfqStore {
     return { ...record };
   }
 
+  async updateStatus(rfqId, status) {
+    const record = this.records.get(rfqId);
+    if (!record) {
+      return null;
+    }
+    record.status = status;
+    record.updatedAt = new Date().toISOString();
+    return { ...record };
+  }
+
   async listByInstitutionWallet(institutionWallet, options = {}) {
     const pairFilter =
       typeof options.pair === "string" && options.pair.trim().length > 0
@@ -104,6 +114,45 @@ class InMemoryRfqStore {
     }
 
     rows.sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+    return rows;
+  }
+
+  async listIncomingForMarketMaker(marketMakerWallet, options = {}) {
+    const pairFilter =
+      typeof options.pair === "string" && options.pair.trim().length > 0
+        ? options.pair.trim().toUpperCase()
+        : null;
+    const sideFilter =
+      typeof options.side === "string" && options.side.trim().length > 0
+        ? options.side.trim()
+        : null;
+
+    const now = Date.now();
+    const rows = [];
+    for (const record of this.records.values()) {
+      const counterparties = Array.isArray(record.counterparties) ? record.counterparties : [];
+      if (!counterparties.includes(marketMakerWallet)) {
+        continue;
+      }
+      if (!["open", "quoted"].includes(record.status)) {
+        continue;
+      }
+
+      const expiresAtMs = Date.parse(record.quoteExpiresAt);
+      if (Number.isFinite(expiresAtMs) && expiresAtMs <= now) {
+        continue;
+      }
+      if (pairFilter && record.pair !== pairFilter) {
+        continue;
+      }
+      if (sideFilter && record.side !== sideFilter) {
+        continue;
+      }
+
+      rows.push({ ...record });
+    }
+
+    rows.sort((left, right) => Date.parse(left.quoteExpiresAt) - Date.parse(right.quoteExpiresAt));
     return rows;
   }
 
@@ -212,6 +261,32 @@ class PostgresRfqStore {
     return mapRfqRow(result.rows[0]);
   }
 
+  async updateStatus(rfqId, status) {
+    const query = `
+      UPDATE rfqs
+      SET status = $2, updated_at = NOW()
+      WHERE id = $1
+      RETURNING
+        id,
+        institution_wallet AS "institutionWallet",
+        pair,
+        side,
+        notional_size::text AS "notionalSize",
+        min_fill_size::text AS "minFillSize",
+        quote_expires_at AS "quoteExpiresAt",
+        status,
+        encrypted_payload AS "encryptedPayload",
+        counterparties AS "counterparties",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+    `;
+    const result = await this.pool.query(query, [rfqId, status]);
+    if (result.rows.length === 0) {
+      return null;
+    }
+    return mapRfqRow(result.rows[0]);
+  }
+
   async listByInstitutionWallet(institutionWallet, options = {}) {
     const conditions = ["institution_wallet = $1"];
     const values = [institutionWallet];
@@ -247,6 +322,50 @@ class PostgresRfqStore {
       WHERE ${conditions.join(" AND ")}
       ORDER BY created_at DESC
     `;
+    const result = await this.pool.query(query, values);
+    return result.rows.map(mapRfqRow);
+  }
+
+  async listIncomingForMarketMaker(marketMakerWallet, options = {}) {
+    const conditions = [
+      `counterparties @> $1::jsonb`,
+      `status IN ('open', 'quoted')`,
+      `quote_expires_at > NOW()`,
+    ];
+    const values = [JSON.stringify([marketMakerWallet])];
+    let index = values.length + 1;
+
+    if (typeof options.pair === "string" && options.pair.trim().length > 0) {
+      conditions.push(`pair = $${index}`);
+      values.push(options.pair.trim().toUpperCase());
+      index += 1;
+    }
+
+    if (typeof options.side === "string" && options.side.trim().length > 0) {
+      conditions.push(`side = $${index}`);
+      values.push(options.side.trim());
+      index += 1;
+    }
+
+    const query = `
+      SELECT
+        id,
+        institution_wallet AS "institutionWallet",
+        pair,
+        side,
+        notional_size::text AS "notionalSize",
+        min_fill_size::text AS "minFillSize",
+        quote_expires_at AS "quoteExpiresAt",
+        status,
+        encrypted_payload AS "encryptedPayload",
+        counterparties AS "counterparties",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM rfqs
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY quote_expires_at ASC, created_at DESC
+    `;
+
     const result = await this.pool.query(query, values);
     return result.rows.map(mapRfqRow);
   }

@@ -20,6 +20,12 @@ export default function DevLayout({
                 Institution
               </Link>
               <Link
+                href="/dev/mm"
+                className="rounded-md border border-[#2f4460] bg-[#122033] px-3 py-1.5 text-xs text-[#dbe5f3] transition hover:border-[#4dd2b3] hover:text-[#4dd2b3]"
+              >
+                Market Maker
+              </Link>
+              <Link
                 href="/dev/console"
                 className="rounded-md border border-[#2f4460] bg-[#122033] px-3 py-1.5 text-xs text-[#dbe5f3] transition hover:border-[#4dd2b3] hover:text-[#4dd2b3]"
               >

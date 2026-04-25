@@ -71,6 +71,11 @@ class InMemoryQuoteStore {
     return quote;
   }
 
+  async getById(quoteId) {
+    const quote = this.byId.get(quoteId);
+    return quote ? { ...quote } : null;
+  }
+
   async getActiveByRfqId(rfqId) {
     const now = Date.now();
     const quotes = [];
@@ -87,6 +92,34 @@ class InMemoryQuoteStore {
       quotes.push(quote);
     }
     return quotes;
+  }
+
+  async listByMarketMakerWallet(marketMakerWallet, options = {}) {
+    const statusFilter =
+      typeof options.status === "string" && options.status.trim().length > 0
+        ? options.status.trim()
+        : null;
+    const rfqIdFilter =
+      typeof options.rfqId === "string" && options.rfqId.trim().length > 0
+        ? options.rfqId.trim()
+        : null;
+
+    const rows = [];
+    for (const quote of this.byId.values()) {
+      if (quote.marketMakerWallet !== marketMakerWallet) {
+        continue;
+      }
+      if (statusFilter && quote.status !== statusFilter) {
+        continue;
+      }
+      if (rfqIdFilter && quote.rfqId !== rfqIdFilter) {
+        continue;
+      }
+      rows.push({ ...quote });
+    }
+
+    rows.sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+    return rows;
   }
 
   async getActiveCountByRfqIds(rfqIds) {
@@ -132,6 +165,17 @@ class InMemoryQuoteStore {
       expired.push({ ...quote });
     }
     return expired;
+  }
+
+  async updateStatus(quoteId, status) {
+    const quote = this.byId.get(quoteId);
+    if (!quote) {
+      return null;
+    }
+
+    quote.status = status;
+    quote.updatedAt = new Date().toISOString();
+    return { ...quote };
   }
 
   async expireDue(nowIso = new Date().toISOString()) {
@@ -203,6 +247,32 @@ class PostgresQuoteStore {
     return mapQuoteRow(result.rows[0]);
   }
 
+  async getById(quoteId) {
+    const query = `
+      SELECT
+        id,
+        rfq_id AS "rfqId",
+        market_maker_wallet AS "marketMakerWallet",
+        all_in_price::text AS "allInPrice",
+        guaranteed_size::text AS "guaranteedSize",
+        valid_until AS "validUntil",
+        settlement_constraints AS "settlementConstraints",
+        encrypted_payload AS "encryptedPayload",
+        signature,
+        status,
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM quotes
+      WHERE id = $1
+      LIMIT 1
+    `;
+    const result = await this.pool.query(query, [quoteId]);
+    if (result.rows.length === 0) {
+      return null;
+    }
+    return mapQuoteRow(result.rows[0]);
+  }
+
   async getActiveByRfqId(rfqId) {
     const query = `
       SELECT
@@ -224,6 +294,45 @@ class PostgresQuoteStore {
         AND valid_until > NOW()
     `;
     const result = await this.pool.query(query, [rfqId]);
+    return result.rows.map(mapQuoteRow);
+  }
+
+  async listByMarketMakerWallet(marketMakerWallet, options = {}) {
+    const conditions = [`market_maker_wallet = $1`];
+    const values = [marketMakerWallet];
+    let index = values.length + 1;
+
+    if (typeof options.status === "string" && options.status.trim().length > 0) {
+      conditions.push(`status = $${index}`);
+      values.push(options.status.trim());
+      index += 1;
+    }
+
+    if (typeof options.rfqId === "string" && options.rfqId.trim().length > 0) {
+      conditions.push(`rfq_id = $${index}`);
+      values.push(options.rfqId.trim());
+      index += 1;
+    }
+
+    const query = `
+      SELECT
+        id,
+        rfq_id AS "rfqId",
+        market_maker_wallet AS "marketMakerWallet",
+        all_in_price::text AS "allInPrice",
+        guaranteed_size::text AS "guaranteedSize",
+        valid_until AS "validUntil",
+        settlement_constraints AS "settlementConstraints",
+        encrypted_payload AS "encryptedPayload",
+        signature,
+        status,
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM quotes
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY created_at DESC
+    `;
+    const result = await this.pool.query(query, values);
     return result.rows.map(mapQuoteRow);
   }
 
@@ -276,6 +385,32 @@ class PostgresQuoteStore {
     `;
     const result = await this.pool.query(query, [quoteIds]);
     return result.rows.map(mapQuoteRow);
+  }
+
+  async updateStatus(quoteId, status) {
+    const query = `
+      UPDATE quotes
+      SET status = $2, updated_at = NOW()
+      WHERE id = $1
+      RETURNING
+        id,
+        rfq_id AS "rfqId",
+        market_maker_wallet AS "marketMakerWallet",
+        all_in_price::text AS "allInPrice",
+        guaranteed_size::text AS "guaranteedSize",
+        valid_until AS "validUntil",
+        settlement_constraints AS "settlementConstraints",
+        encrypted_payload AS "encryptedPayload",
+        signature,
+        status,
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+    `;
+    const result = await this.pool.query(query, [quoteId, status]);
+    if (result.rows.length === 0) {
+      return null;
+    }
+    return mapQuoteRow(result.rows[0]);
   }
 
   async expireDue(nowIso = new Date().toISOString()) {

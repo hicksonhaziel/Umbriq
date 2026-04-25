@@ -15,6 +15,12 @@ const { verifyQuoteSignature } = require("./lib/quote-message");
 const { rankQuotes } = require("./lib/quote-ranking");
 const { InMemoryQuoteStore, createPostgresQuoteStore } = require("./lib/quote-store");
 const { QuoteExpiryService } = require("./lib/quote-expiry-service");
+const { validateSettlementAcceptPayload } = require("./lib/settlement-validation");
+const {
+  InMemorySettlementStore,
+  createPostgresSettlementStore,
+} = require("./lib/settlement-store");
+const { SettlementOrchestrationService } = require("./lib/settlement-orchestration-service");
 const { RfqRealtimeHub } = require("./lib/rfq-realtime");
 const {
   VALID_UMBRA_STATUS,
@@ -23,6 +29,7 @@ const {
 } = require("./lib/umbra-account-store");
 
 const VALID_ROLES = ["institution", "market_maker", "compliance"];
+const VALID_QUOTE_STATUSES = ["active", "expired", "rejected", "accepted", "withdrawn"];
 const NONCE_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_SESSION_TTL_SECONDS = 60 * 60 * 8;
 const DEFAULT_QUOTE_EXPIRY_POLL_MS = 1000;
@@ -107,6 +114,13 @@ async function buildServer(options = {}) {
           connectionString: options.databaseUrl || process.env.DATABASE_URL,
         });
   const rfqRealtimeHub = options.rfqRealtimeHub || new RfqRealtimeHub();
+  const settlementStore = options.settlementStore
+    ? options.settlementStore
+    : options.enablePostgres === false || !(options.databaseUrl || process.env.DATABASE_URL)
+      ? new InMemorySettlementStore()
+      : createPostgresSettlementStore({
+          connectionString: options.databaseUrl || process.env.DATABASE_URL,
+        });
   const quoteExpiryService = new QuoteExpiryService({
     quoteStore,
     redis: app.redis || null,
@@ -115,6 +129,15 @@ async function buildServer(options = {}) {
       rfqRealtimeHub.broadcastQuoteExpired(quote);
     },
     logger: app.log,
+  });
+  const settlementOrchestrationService = new SettlementOrchestrationService({
+    settlementStore,
+    quoteStore,
+    rfqStore,
+    rfqRealtimeHub,
+    logger: app.log,
+    startDelayMs: options.settlementStartDelayMs ?? 80,
+    confirmDelayMs: options.settlementConfirmDelayMs ?? 160,
   });
   quoteExpiryService.start();
 
@@ -125,6 +148,9 @@ async function buildServer(options = {}) {
     }
     if (typeof quoteStore.close === "function") {
       await quoteStore.close();
+    }
+    if (typeof settlementStore.close === "function") {
+      await settlementStore.close();
     }
   });
 
@@ -321,6 +347,56 @@ async function buildServer(options = {}) {
     };
   });
 
+  app.get("/rfqs/incoming", { preHandler: authenticate }, async (request, reply) => {
+    if (request.session.role !== "market_maker") {
+      return reply.code(403).send({
+        error: "Only market_maker role can view incoming RFQs",
+      });
+    }
+
+    await quoteExpiryService.sweepOnce();
+
+    const pair =
+      typeof request.query?.pair === "string" ? request.query.pair : undefined;
+    const side =
+      typeof request.query?.side === "string" ? request.query.side : undefined;
+
+    const rfqs = await rfqStore.listIncomingForMarketMaker(request.session.walletAddress, {
+      pair,
+      side,
+    });
+
+    const myQuotes = await quoteStore.listByMarketMakerWallet(request.session.walletAddress);
+    const quoteByRfqId = new Map();
+    for (const quote of myQuotes) {
+      if (!quoteByRfqId.has(quote.rfqId)) {
+        quoteByRfqId.set(quote.rfqId, quote);
+      }
+    }
+
+    return {
+      count: rfqs.length,
+      rfqs: rfqs.map((rfq) => {
+        const myQuote = quoteByRfqId.get(rfq.id) || null;
+        return {
+          ...rfq,
+          canSubmitQuote: !myQuote,
+          myQuote: myQuote
+            ? {
+                id: myQuote.id,
+                allInPrice: myQuote.allInPrice,
+                guaranteedSize: myQuote.guaranteedSize,
+                validUntil: myQuote.validUntil,
+                status: myQuote.status,
+                createdAt: myQuote.createdAt,
+                updatedAt: myQuote.updatedAt,
+              }
+            : null,
+        };
+      }),
+    };
+  });
+
   app.post("/quotes", { preHandler: authenticate }, async (request, reply) => {
     if (request.session.role !== "market_maker") {
       return reply.code(403).send({
@@ -478,6 +554,224 @@ async function buildServer(options = {}) {
       rfqSide: rfq.side,
       count: ranked.length,
       quotes: ranked,
+    };
+  });
+
+  app.get("/quotes/mine", { preHandler: authenticate }, async (request, reply) => {
+    if (request.session.role !== "market_maker") {
+      return reply.code(403).send({
+        error: "Only market_maker role can view own quotes",
+      });
+    }
+
+    await quoteExpiryService.sweepOnce();
+
+    const status =
+      typeof request.query?.status === "string" ? request.query.status.trim() : "";
+    if (status && !VALID_QUOTE_STATUSES.includes(status)) {
+      return reply.code(400).send({
+        error: `Invalid status. Valid values: ${VALID_QUOTE_STATUSES.join(", ")}`,
+      });
+    }
+
+    const quotes = await quoteStore.listByMarketMakerWallet(request.session.walletAddress, {
+      status: status || undefined,
+    });
+
+    const rfqIds = Array.from(new Set(quotes.map((quote) => quote.rfqId)));
+    const rfqEntries = await Promise.all(
+      rfqIds.map(async (rfqId) => [rfqId, await rfqStore.getById(rfqId)])
+    );
+    const rfqById = new Map(rfqEntries);
+
+    return {
+      count: quotes.length,
+      quotes: quotes.map((quote) => {
+        const rfq = rfqById.get(quote.rfqId) || null;
+        return {
+          ...quote,
+          rfq: rfq
+            ? {
+                id: rfq.id,
+                institutionWallet: rfq.institutionWallet,
+                pair: rfq.pair,
+                side: rfq.side,
+                notionalSize: rfq.notionalSize,
+                minFillSize: rfq.minFillSize,
+                quoteExpiresAt: rfq.quoteExpiresAt,
+                status: rfq.status,
+              }
+            : null,
+        };
+      }),
+    };
+  });
+
+  app.post("/settlements/accept", { preHandler: authenticate }, async (request, reply) => {
+    if (request.session.role !== "institution") {
+      return reply.code(403).send({
+        error: "Only institution role can accept quotes for settlement",
+      });
+    }
+
+    const validated = validateSettlementAcceptPayload(request.body);
+    if (validated.error) {
+      return reply.code(400).send({ error: validated.error });
+    }
+
+    await quoteExpiryService.sweepOnce();
+
+    const quote = await quoteStore.getById(validated.value.quoteId);
+    if (!quote) {
+      return reply.code(404).send({
+        error: "Quote not found",
+      });
+    }
+
+    if (quote.status !== "active") {
+      return reply.code(409).send({
+        error: `Quote is not active. Current status: ${quote.status}`,
+      });
+    }
+
+    if (Date.parse(quote.validUntil) <= Date.now()) {
+      return reply.code(409).send({
+        error: "Quote has expired",
+      });
+    }
+
+    const rfq = await rfqStore.getById(quote.rfqId);
+    if (!rfq) {
+      return reply.code(404).send({
+        error: "RFQ not found for quote",
+      });
+    }
+
+    if (rfq.institutionWallet !== request.session.walletAddress) {
+      return reply.code(403).send({
+        error: "Institutions can only accept quotes for their own RFQs",
+      });
+    }
+
+    if (Date.parse(rfq.quoteExpiresAt) <= Date.now()) {
+      return reply.code(409).send({
+        error: "RFQ quote window has expired",
+      });
+    }
+
+    const existingSettlement = await settlementStore.getByQuoteId(quote.id);
+    if (existingSettlement) {
+      return reply.code(409).send({
+        error: "Settlement already exists for this quote",
+        settlementId: existingSettlement.id,
+      });
+    }
+
+    try {
+      await quoteStore.updateStatus(quote.id, "accepted");
+      await rfqStore.updateStatus(rfq.id, "accepted");
+
+      const created = await settlementStore.create({
+        rfqId: rfq.id,
+        quoteId: quote.id,
+        status: "accepted",
+        receipt: {},
+        proof: {},
+      });
+
+      if (typeof rfqRealtimeHub.broadcast === "function") {
+        rfqRealtimeHub.broadcast("settlement.accepted", {
+          id: created.id,
+          rfqId: created.rfqId,
+          quoteId: created.quoteId,
+          status: created.status,
+          createdAt: created.createdAt,
+          updatedAt: created.updatedAt,
+        });
+      }
+      void settlementOrchestrationService.run(created.id);
+      return reply.code(201).send(created);
+    } catch (error) {
+      request.log.error({ error }, "Failed to accept quote for settlement");
+      if (error && error.code === "23505") {
+        return reply.code(409).send({
+          error: "Settlement already exists for this quote",
+        });
+      }
+      const detail =
+        error && typeof error.message === "string" ? error.message : "Unknown error";
+      const code = error && typeof error.code === "string" ? error.code : null;
+      return reply.code(500).send({
+        error: "Failed to accept quote",
+        ...(process.env.NODE_ENV !== "production"
+          ? {
+              detail,
+              code,
+            }
+          : {}),
+      });
+    }
+  });
+
+  app.get("/settlements/:settlementId", { preHandler: authenticate }, async (request, reply) => {
+    const settlementId = request.params?.settlementId;
+    if (typeof settlementId !== "string" || settlementId.trim().length === 0) {
+      return reply.code(400).send({
+        error: "settlementId is required",
+      });
+    }
+
+    const settlement = await settlementStore.getById(settlementId.trim());
+    if (!settlement) {
+      return reply.code(404).send({
+        error: "Settlement not found",
+      });
+    }
+
+    const rfq = await rfqStore.getById(settlement.rfqId);
+    const quote = await quoteStore.getById(settlement.quoteId);
+
+    if (!rfq || !quote) {
+      return reply.code(404).send({
+        error: "Settlement dependencies not found",
+      });
+    }
+
+    const role = request.session.role;
+    if (role === "institution" && rfq.institutionWallet !== request.session.walletAddress) {
+      return reply.code(403).send({
+        error: "Institutions can only view their own settlements",
+      });
+    }
+    if (role === "market_maker" && quote.marketMakerWallet !== request.session.walletAddress) {
+      return reply.code(403).send({
+        error: "Market makers can only view their own settlements",
+      });
+    }
+    if (!["institution", "market_maker", "compliance"].includes(role)) {
+      return reply.code(403).send({
+        error: "Unauthorized role for settlement view",
+      });
+    }
+
+    return {
+      ...settlement,
+      rfq: {
+        id: rfq.id,
+        institutionWallet: rfq.institutionWallet,
+        pair: rfq.pair,
+        side: rfq.side,
+        status: rfq.status,
+        quoteExpiresAt: rfq.quoteExpiresAt,
+      },
+      quote: {
+        id: quote.id,
+        marketMakerWallet: quote.marketMakerWallet,
+        allInPrice: quote.allInPrice,
+        guaranteedSize: quote.guaranteedSize,
+        status: quote.status,
+        validUntil: quote.validUntil,
+      },
     };
   });
 
