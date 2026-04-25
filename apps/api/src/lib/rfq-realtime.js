@@ -64,6 +64,30 @@ class RfqRealtimeHub {
     };
     this.broadcast("rfq.created", publicPayload);
   }
+
+  broadcastQuoteSubmitted(quote) {
+    this.broadcast("quote.submitted", {
+      id: quote.id,
+      rfqId: quote.rfqId,
+      marketMakerWallet: quote.marketMakerWallet,
+      allInPrice: quote.allInPrice,
+      guaranteedSize: quote.guaranteedSize,
+      validUntil: quote.validUntil,
+      status: quote.status,
+      createdAt: quote.createdAt,
+      updatedAt: quote.updatedAt,
+    });
+  }
+
+  broadcastQuoteExpired(quote) {
+    this.broadcast("quote.expired", {
+      id: quote.id,
+      rfqId: quote.rfqId,
+      marketMakerWallet: quote.marketMakerWallet,
+      status: quote.status,
+      updatedAt: quote.updatedAt,
+    });
+  }
 }
 
 module.exports = {

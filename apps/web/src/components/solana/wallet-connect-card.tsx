@@ -70,6 +70,7 @@ export function WalletConnectCard() {
   const [rfqLoading, setRfqLoading] = useState(false);
   const [rfqError, setRfqError] = useState<string | null>(null);
   const [rfqCreated, setRfqCreated] = useState<RfqCreateResponse | null>(null);
+  const [rfqCopyState, setRfqCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const [wsState, setWsState] = useState<WsConnectionState>("disconnected");
   const [wsEvents, setWsEvents] = useState<string[]>([]);
   const [mounted, setMounted] = useState(false);
@@ -108,7 +109,7 @@ export function WalletConnectCard() {
       };
 
       ws.onmessage = (event) => {
-        let parsed;
+        let parsed: unknown;
         try {
           parsed = JSON.parse(String(event.data || ""));
         } catch {
@@ -116,18 +117,46 @@ export function WalletConnectCard() {
         }
 
         const eventName =
-          parsed && typeof parsed.event === "string" ? parsed.event : "unknown";
-        const rfqId =
           parsed &&
+          typeof parsed === "object" &&
+          "event" in parsed &&
+          typeof parsed.event === "string"
+            ? parsed.event
+            : "unknown";
+
+        const payload =
+          parsed &&
+          typeof parsed === "object" &&
+          "payload" in parsed &&
           parsed.payload &&
-          typeof parsed.payload.id === "string" &&
-          parsed.payload.id.length > 0
-            ? parsed.payload.id.slice(0, 8)
+          typeof parsed.payload === "object"
+            ? (parsed.payload as Record<string, unknown>)
             : null;
 
-        const line = rfqId
-          ? `[event] ${eventName} (rfq=${rfqId}...)`
-          : `[event] ${eventName}`;
+        const id =
+          payload && typeof payload.id === "string" && payload.id.length > 0
+            ? payload.id.slice(0, 8)
+            : null;
+        const rfqId =
+          payload && typeof payload.rfqId === "string" && payload.rfqId.length > 0
+            ? payload.rfqId.slice(0, 8)
+            : null;
+
+        let details = "";
+        if (eventName.startsWith("quote.")) {
+          if (id) {
+            details = `quote=${id}...`;
+          }
+          if (rfqId) {
+            details = details ? `${details}, rfq=${rfqId}...` : `rfq=${rfqId}...`;
+          }
+        } else if (eventName.startsWith("rfq.")) {
+          if (id) {
+            details = `rfq=${id}...`;
+          }
+        }
+
+        const line = details ? `[event] ${eventName} (${details})` : `[event] ${eventName}`;
 
         setWsEvents((current) => [line, ...current].slice(0, 10));
       };
@@ -408,6 +437,7 @@ export function WalletConnectCard() {
       setRfqLoading(true);
       setRfqError(null);
       setRfqCreated(null);
+      setRfqCopyState("idle");
 
       const quoteExpiresAt = new Date(
         Date.now() + Math.floor(expiryMinutes * 60 * 1000)
@@ -471,6 +501,18 @@ export function WalletConnectCard() {
     rfqSide,
     sessionToken,
   ]);
+
+  const copyRfqId = useCallback(async () => {
+    if (!rfqCreated) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(rfqCreated.id);
+      setRfqCopyState("copied");
+    } catch {
+      setRfqCopyState("failed");
+    }
+  }, [rfqCreated]);
 
   const logout = useCallback(async () => {
     if (!sessionToken) {
@@ -678,9 +720,28 @@ export function WalletConnectCard() {
           </div>
 
           {rfqCreated ? (
-            <p className="mt-3 text-sm text-[#6ee7d7]">
-              Created RFQ {rfqCreated.id.slice(0, 8)}... ({rfqCreated.pair}, {rfqCreated.side})
-            </p>
+            <div className="mt-3 space-y-2">
+              <p className="text-sm text-[#6ee7d7]">
+                Created RFQ {rfqCreated.id.slice(0, 8)}... ({rfqCreated.pair}, {rfqCreated.side})
+              </p>
+              <p className="text-xs text-[#aeb9c7]">
+                Full RFQ ID:{" "}
+                <code className="rounded bg-[#0b1118] px-2 py-1 text-[#d8dee9]">
+                  {rfqCreated.id}
+                </code>
+              </p>
+              <div className="flex items-center gap-3">
+                <Button size="sm" variant="outline" onClick={() => void copyRfqId()}>
+                  Copy RFQ ID
+                </Button>
+                {rfqCopyState === "copied" ? (
+                  <span className="text-xs text-[#6ee7d7]">Copied</span>
+                ) : null}
+                {rfqCopyState === "failed" ? (
+                  <span className="text-xs text-red-300">Copy failed</span>
+                ) : null}
+              </div>
+            </div>
           ) : null}
           {rfqError ? <p className="mt-3 text-sm text-red-300">{rfqError}</p> : null}
 

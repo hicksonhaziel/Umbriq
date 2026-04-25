@@ -62,6 +62,23 @@ class InMemoryRfqStore {
     return record;
   }
 
+  async getById(rfqId) {
+    const record = this.records.get(rfqId);
+    return record ? { ...record } : null;
+  }
+
+  async markQuoted(rfqId) {
+    const record = this.records.get(rfqId);
+    if (!record) {
+      return null;
+    }
+    if (record.status === "open") {
+      record.status = "quoted";
+      record.updatedAt = new Date().toISOString();
+    }
+    return { ...record };
+  }
+
   async close() {}
 }
 
@@ -111,6 +128,59 @@ class PostgresRfqStore {
     ];
 
     const result = await this.pool.query(query, values);
+    return mapRfqRow(result.rows[0]);
+  }
+
+  async getById(rfqId) {
+    const query = `
+      SELECT
+        id,
+        institution_wallet AS "institutionWallet",
+        pair,
+        side,
+        notional_size::text AS "notionalSize",
+        min_fill_size::text AS "minFillSize",
+        quote_expires_at AS "quoteExpiresAt",
+        status,
+        encrypted_payload AS "encryptedPayload",
+        counterparties AS "counterparties",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM rfqs
+      WHERE id = $1
+      LIMIT 1
+    `;
+    const result = await this.pool.query(query, [rfqId]);
+    if (result.rows.length === 0) {
+      return null;
+    }
+    return mapRfqRow(result.rows[0]);
+  }
+
+  async markQuoted(rfqId) {
+    const query = `
+      UPDATE rfqs
+      SET status = CASE WHEN status = 'open' THEN 'quoted' ELSE status END,
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING
+        id,
+        institution_wallet AS "institutionWallet",
+        pair,
+        side,
+        notional_size::text AS "notionalSize",
+        min_fill_size::text AS "minFillSize",
+        quote_expires_at AS "quoteExpiresAt",
+        status,
+        encrypted_payload AS "encryptedPayload",
+        counterparties AS "counterparties",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+    `;
+    const result = await this.pool.query(query, [rfqId]);
+    if (result.rows.length === 0) {
+      return null;
+    }
     return mapRfqRow(result.rows[0]);
   }
 

@@ -10,6 +10,11 @@ const { buildAuthMessage } = require("./lib/auth-message");
 const { InMemorySessionStore, RedisSessionStore } = require("./lib/session-store");
 const { validateRfqCreatePayload } = require("./lib/rfq-validation");
 const { InMemoryRfqStore, createPostgresRfqStore } = require("./lib/rfq-store");
+const { validateQuoteCreatePayload } = require("./lib/quote-validation");
+const { verifyQuoteSignature } = require("./lib/quote-message");
+const { rankQuotes } = require("./lib/quote-ranking");
+const { InMemoryQuoteStore, createPostgresQuoteStore } = require("./lib/quote-store");
+const { QuoteExpiryService } = require("./lib/quote-expiry-service");
 const { RfqRealtimeHub } = require("./lib/rfq-realtime");
 const {
   VALID_UMBRA_STATUS,
@@ -20,6 +25,7 @@ const {
 const VALID_ROLES = ["institution", "market_maker", "compliance"];
 const NONCE_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_SESSION_TTL_SECONDS = 60 * 60 * 8;
+const DEFAULT_QUOTE_EXPIRY_POLL_MS = 1000;
 const bs58Codec = bs58.default || bs58;
 
 function getAuthToken(request) {
@@ -55,6 +61,11 @@ function closeWebsocket(socket, code, reason) {
   } catch {}
 }
 
+function toNumber(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : NaN;
+}
+
 async function buildServer(options = {}) {
   const app = fastify({
     logger: options.logger ?? true,
@@ -88,11 +99,32 @@ async function buildServer(options = {}) {
       : createPostgresRfqStore({
           connectionString: options.databaseUrl || process.env.DATABASE_URL,
         });
+  const quoteStore = options.quoteStore
+    ? options.quoteStore
+    : options.enablePostgres === false || !(options.databaseUrl || process.env.DATABASE_URL)
+      ? new InMemoryQuoteStore()
+      : createPostgresQuoteStore({
+          connectionString: options.databaseUrl || process.env.DATABASE_URL,
+        });
   const rfqRealtimeHub = options.rfqRealtimeHub || new RfqRealtimeHub();
+  const quoteExpiryService = new QuoteExpiryService({
+    quoteStore,
+    redis: app.redis || null,
+    pollMs: options.quoteExpiryPollMs || DEFAULT_QUOTE_EXPIRY_POLL_MS,
+    onQuoteExpired: async (quote) => {
+      rfqRealtimeHub.broadcastQuoteExpired(quote);
+    },
+    logger: app.log,
+  });
+  quoteExpiryService.start();
 
   app.addHook("onClose", async () => {
+    quoteExpiryService.stop();
     if (typeof rfqStore.close === "function") {
       await rfqStore.close();
+    }
+    if (typeof quoteStore.close === "function") {
+      await quoteStore.close();
     }
   });
 
@@ -255,6 +287,166 @@ async function buildServer(options = {}) {
           : {}),
       });
     }
+  });
+
+  app.post("/quotes", { preHandler: authenticate }, async (request, reply) => {
+    if (request.session.role !== "market_maker") {
+      return reply.code(403).send({
+        error: "Only market_maker role can submit quotes",
+      });
+    }
+
+    const validated = validateQuoteCreatePayload(request.body);
+    if (validated.error) {
+      return reply.code(400).send({ error: validated.error });
+    }
+
+    const rfq = await rfqStore.getById(validated.value.rfqId);
+    if (!rfq) {
+      return reply.code(404).send({ error: "RFQ not found" });
+    }
+
+    if (!["open", "quoted"].includes(rfq.status)) {
+      return reply.code(409).send({
+        error: `RFQ is not quotable. Current status: ${rfq.status}`,
+      });
+    }
+
+    const rfqExpiryMs = Date.parse(rfq.quoteExpiresAt);
+    const validUntilMs = Date.parse(validated.value.validUntil);
+    const nowMs = Date.now();
+
+    if (validUntilMs <= nowMs) {
+      return reply.code(400).send({
+        error: "validUntil must be in the future",
+      });
+    }
+
+    if (validUntilMs > rfqExpiryMs) {
+      return reply.code(400).send({
+        error: "validUntil cannot exceed RFQ quote expiry",
+      });
+    }
+
+    if (rfqExpiryMs <= nowMs) {
+      return reply.code(409).send({
+        error: "RFQ quote window has expired",
+      });
+    }
+
+    const allowedCounterparties = Array.isArray(rfq.counterparties) ? rfq.counterparties : [];
+    if (!allowedCounterparties.includes(request.session.walletAddress)) {
+      return reply.code(403).send({
+        error: "Market maker is not allowlisted for this RFQ",
+      });
+    }
+
+    const guaranteedSize = toNumber(validated.value.guaranteedSize);
+    const notionalSize = toNumber(rfq.notionalSize);
+    if (!Number.isFinite(guaranteedSize) || !Number.isFinite(notionalSize)) {
+      return reply.code(400).send({
+        error: "Invalid guaranteedSize or RFQ notional size",
+      });
+    }
+    if (guaranteedSize > notionalSize) {
+      return reply.code(400).send({
+        error: "guaranteedSize cannot exceed RFQ notional size",
+      });
+    }
+
+    const signatureValid = verifyQuoteSignature({
+      rfqId: validated.value.rfqId,
+      marketMakerWallet: request.session.walletAddress,
+      allInPrice: validated.value.allInPrice,
+      guaranteedSize: validated.value.guaranteedSize,
+      validUntil: validated.value.validUntil,
+      signature: validated.value.signature,
+    });
+    if (!signatureValid) {
+      return reply.code(401).send({
+        error: "Quote signature verification failed",
+      });
+    }
+
+    try {
+      const created = await quoteStore.create({
+        rfqId: validated.value.rfqId,
+        marketMakerWallet: request.session.walletAddress,
+        allInPrice: validated.value.allInPrice,
+        guaranteedSize: validated.value.guaranteedSize,
+        validUntil: validated.value.validUntil,
+        settlementConstraints: validated.value.settlementConstraints,
+        encryptedPayload: validated.value.encryptedPayload,
+        signature: validated.value.signature,
+      });
+
+      await rfqStore.markQuoted(validated.value.rfqId);
+      await quoteExpiryService.scheduleQuote(created);
+      rfqRealtimeHub.broadcastQuoteSubmitted(created);
+      return reply.code(201).send(created);
+    } catch (error) {
+      request.log.error({ error }, "Failed to submit quote");
+      if (error && error.code === "23505") {
+        return reply.code(409).send({
+          error: "Quote already submitted for this RFQ by this market maker",
+        });
+      }
+      const detail =
+        error && typeof error.message === "string" ? error.message : "Unknown error";
+      const code = error && typeof error.code === "string" ? error.code : null;
+      return reply.code(500).send({
+        error: "Failed to submit quote",
+        ...(process.env.NODE_ENV !== "production"
+          ? {
+              detail,
+              code,
+            }
+          : {}),
+      });
+    }
+  });
+
+  app.get("/rfqs/:rfqId/quotes", { preHandler: authenticate }, async (request, reply) => {
+    const rfqId = request.params?.rfqId;
+    if (typeof rfqId !== "string" || rfqId.trim().length === 0) {
+      return reply.code(400).send({
+        error: "rfqId is required",
+      });
+    }
+
+    await quoteExpiryService.sweepOnce();
+
+    const rfq = await rfqStore.getById(rfqId);
+    if (!rfq) {
+      return reply.code(404).send({
+        error: "RFQ not found",
+      });
+    }
+
+    if (
+      request.session.role === "institution" &&
+      request.session.walletAddress !== rfq.institutionWallet
+    ) {
+      return reply.code(403).send({
+        error: "Institutions can only view quotes for their own RFQs",
+      });
+    }
+
+    if (!["institution", "compliance"].includes(request.session.role)) {
+      return reply.code(403).send({
+        error: "Only institution or compliance roles can view ranked quotes",
+      });
+    }
+
+    const activeQuotes = await quoteStore.getActiveByRfqId(rfqId);
+    const ranked = rankQuotes(activeQuotes, rfq.side);
+
+    return {
+      rfqId,
+      rfqSide: rfq.side,
+      count: ranked.length,
+      quotes: ranked,
+    };
   });
 
   app.get("/ws/rfqs", { websocket: true }, async (connection, request) => {
