@@ -1,15 +1,17 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { LAMPORTS_PER_SOL } from "@solana/web3.js";
 import bs58 from "bs58";
 import { initializeUmbraAccount, type UmbraAccountState } from "@/lib/umbra/client";
+import { encryptRfqPayload } from "@/lib/rfq/encryption";
 import { Button } from "@/components/ui/button";
 
 type Role = "institution" | "market_maker" | "compliance";
 type UmbraStatus = "not_initialized" | "initializing" | "initialized" | "failed";
+type RfqSide = "buy" | "sell";
 
 type UmbraStateResponse = {
   network: string;
@@ -18,6 +20,28 @@ type UmbraStateResponse = {
   accountState: UmbraAccountState;
   lastError: string | null;
 };
+
+type RfqCreateResponse = {
+  id: string;
+  pair: string;
+  side: RfqSide;
+  notionalSize: string;
+  minFillSize: string | null;
+  quoteExpiresAt: string;
+  status: string;
+};
+
+type WsConnectionState = "disconnected" | "connecting" | "connected" | "error";
+
+function toWebsocketBaseUrl(apiBaseUrl: string): string {
+  if (apiBaseUrl.startsWith("https://")) {
+    return `wss://${apiBaseUrl.slice("https://".length)}`;
+  }
+  if (apiBaseUrl.startsWith("http://")) {
+    return `ws://${apiBaseUrl.slice("http://".length)}`;
+  }
+  return apiBaseUrl;
+}
 
 export function WalletConnectCard() {
   const { connection } = useConnection();
@@ -37,6 +61,106 @@ export function WalletConnectCard() {
   const [umbraAccountState, setUmbraAccountState] = useState<UmbraAccountState>(null);
   const [umbraLoading, setUmbraLoading] = useState(false);
   const [umbraError, setUmbraError] = useState<string | null>(null);
+  const [rfqPair, setRfqPair] = useState("SOL/USDC");
+  const [rfqSide, setRfqSide] = useState<RfqSide>("buy");
+  const [rfqNotionalSize, setRfqNotionalSize] = useState("1000");
+  const [rfqMinFillSize, setRfqMinFillSize] = useState("500");
+  const [rfqExpiryMinutes, setRfqExpiryMinutes] = useState("2");
+  const [rfqCounterparties, setRfqCounterparties] = useState("");
+  const [rfqLoading, setRfqLoading] = useState(false);
+  const [rfqError, setRfqError] = useState<string | null>(null);
+  const [rfqCreated, setRfqCreated] = useState<RfqCreateResponse | null>(null);
+  const [wsState, setWsState] = useState<WsConnectionState>("disconnected");
+  const [wsEvents, setWsEvents] = useState<string[]>([]);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!sessionToken) {
+      setWsState("disconnected");
+      setWsEvents([]);
+      return;
+    }
+
+    const token = sessionToken;
+    const wsBaseUrl = toWebsocketBaseUrl(apiBaseUrl);
+    let active = true;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let ws: WebSocket | null = null;
+
+    function connect() {
+      if (!active) {
+        return;
+      }
+
+      setWsState("connecting");
+      ws = new WebSocket(`${wsBaseUrl}/ws/rfqs?token=${encodeURIComponent(token)}`);
+
+      ws.onopen = () => {
+        setWsState("connected");
+        setWsEvents((current) => {
+          const next = ["[connected] subscribed to /ws/rfqs", ...current];
+          return next.slice(0, 10);
+        });
+      };
+
+      ws.onmessage = (event) => {
+        let parsed;
+        try {
+          parsed = JSON.parse(String(event.data || ""));
+        } catch {
+          return;
+        }
+
+        const eventName =
+          parsed && typeof parsed.event === "string" ? parsed.event : "unknown";
+        const rfqId =
+          parsed &&
+          parsed.payload &&
+          typeof parsed.payload.id === "string" &&
+          parsed.payload.id.length > 0
+            ? parsed.payload.id.slice(0, 8)
+            : null;
+
+        const line = rfqId
+          ? `[event] ${eventName} (rfq=${rfqId}...)`
+          : `[event] ${eventName}`;
+
+        setWsEvents((current) => [line, ...current].slice(0, 10));
+      };
+
+      ws.onerror = () => {
+        setWsState("error");
+        setWsEvents((current) => ["[error] websocket connection failed", ...current]);
+      };
+
+      ws.onclose = () => {
+        if (!active) {
+          setWsState("disconnected");
+          return;
+        }
+        setWsState("connecting");
+        reconnectTimer = setTimeout(() => {
+          connect();
+        }, 1000);
+      };
+    }
+
+    connect();
+
+    return () => {
+      active = false;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+      }
+      if (ws) {
+        ws.close();
+      }
+    };
+  }, [apiBaseUrl, sessionToken]);
 
   const walletAddress = useMemo(() => {
     if (!publicKey) {
@@ -259,6 +383,95 @@ export function WalletConnectCard() {
     umbraSignatures,
   ]);
 
+  const createRfq = useCallback(async () => {
+    if (!sessionToken || !publicKey) {
+      setRfqError("Authenticate first");
+      return;
+    }
+
+    const expiryMinutes = Number(rfqExpiryMinutes);
+    if (!Number.isFinite(expiryMinutes) || expiryMinutes <= 0) {
+      setRfqError("Expiry minutes must be greater than zero");
+      return;
+    }
+
+    const counterparties = rfqCounterparties
+      .split(/[\n,]/)
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+    if (counterparties.length === 0) {
+      setRfqError("Add at least one counterparty wallet address");
+      return;
+    }
+
+    try {
+      setRfqLoading(true);
+      setRfqError(null);
+      setRfqCreated(null);
+
+      const quoteExpiresAt = new Date(
+        Date.now() + Math.floor(expiryMinutes * 60 * 1000)
+      ).toISOString();
+      const plainPayload = {
+        pair: rfqPair,
+        side: rfqSide,
+        notionalSize: rfqNotionalSize,
+        minFillSize: rfqMinFillSize,
+        quoteExpiresAt,
+        counterparties,
+        walletAddress: publicKey.toBase58(),
+      };
+      const encryptedPayload = await encryptRfqPayload(plainPayload);
+
+      const response = await fetch(`${apiBaseUrl}/rfqs`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify({
+          pair: rfqPair,
+          side: rfqSide,
+          notionalSize: rfqNotionalSize,
+          minFillSize: rfqMinFillSize,
+          quoteExpiresAt,
+          counterparties,
+          encryptedPayload,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorBody = (await response.json().catch(() => ({}))) as {
+          error?: string;
+          detail?: string;
+          code?: string | null;
+        };
+        const detailPart = errorBody.detail ? ` (${errorBody.detail})` : "";
+        const codePart = errorBody.code ? ` [${errorBody.code}]` : "";
+        throw new Error(
+          `${errorBody.error || "Failed to create RFQ"}${codePart}${detailPart}`
+        );
+      }
+
+      const created = (await response.json()) as RfqCreateResponse;
+      setRfqCreated(created);
+    } catch (error) {
+      setRfqError(error instanceof Error ? error.message : "Failed to create RFQ");
+    } finally {
+      setRfqLoading(false);
+    }
+  }, [
+    apiBaseUrl,
+    publicKey,
+    rfqCounterparties,
+    rfqExpiryMinutes,
+    rfqMinFillSize,
+    rfqNotionalSize,
+    rfqPair,
+    rfqSide,
+    sessionToken,
+  ]);
+
   const logout = useCallback(async () => {
     if (!sessionToken) {
       return;
@@ -277,50 +490,210 @@ export function WalletConnectCard() {
 
   return (
     <section className="rounded-xl border border-[#2a323d] bg-[#131a22] p-6">
-      <h2 className="mb-2 text-xl font-semibold text-white">Wallet + Auth + Umbra</h2>
+      <h2 className="mb-2 text-xl font-semibold text-white">Dev Flow Test Console</h2>
       <p className="mb-6 text-sm text-[#aeb9c7]">
-        Network: <span className="text-[#6ee7d7]">Solana Devnet</span>
+        Follow these steps in order. Network:{" "}
+        <span className="text-[#6ee7d7]">Solana Devnet</span>
       </p>
 
-      <div className="flex flex-wrap items-center gap-3">
-        <WalletMultiButton className="!h-10 !rounded-md !bg-[#14b8a6] !px-4 !text-sm !font-semibold !text-[#05322d] hover:!bg-[#0d9488]" />
-        <Button
-          variant="outline"
-          onClick={() => void disconnect()}
-          disabled={!connected || connecting}
-        >
-          Disconnect
-        </Button>
-        <Button variant="outline" onClick={() => void refreshBalance()} disabled={!connected}>
-          Refresh Balance
-        </Button>
-      </div>
+      <div className="space-y-4">
+        <div className="rounded-lg border border-[#2a323d] p-4">
+          <h3 className="text-sm font-semibold text-white">
+            Step 1: Connect wallet and confirm balance
+          </h3>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            {mounted ? (
+              <WalletMultiButton className="!h-10 !rounded-md !bg-[#14b8a6] !px-4 !text-sm !font-semibold !text-[#05322d] hover:!bg-[#0d9488]" />
+            ) : (
+              <button
+                type="button"
+                disabled
+                className="h-10 rounded-md bg-[#14b8a6] px-4 text-sm font-semibold text-[#05322d] opacity-70"
+              >
+                Select Wallet
+              </button>
+            )}
+            <Button
+              variant="outline"
+              onClick={() => void disconnect()}
+              disabled={!connected || connecting}
+            >
+              Disconnect
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => void refreshBalance()}
+              disabled={!connected}
+            >
+              Refresh Balance
+            </Button>
+          </div>
+        </div>
 
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        <select
-          value={role}
-          onChange={(event) => setRole(event.target.value as Role)}
-          className="h-10 rounded-md border border-[#2a323d] bg-transparent px-3 text-sm text-[#d8dee9] outline-none"
-        >
-          <option value="institution">Institution</option>
-          <option value="market_maker">MarketMaker</option>
-          <option value="compliance">Compliance</option>
-        </select>
-        <Button onClick={() => void authenticate()} disabled={!connected || authLoading}>
-          {authLoading ? "Authenticating..." : "Authenticate"}
-        </Button>
-        <Button variant="outline" onClick={() => void logout()} disabled={!sessionToken}>
-          Logout Session
-        </Button>
-      </div>
+        <div className="rounded-lg border border-[#2a323d] p-4">
+          <h3 className="text-sm font-semibold text-white">
+            Step 2: Authenticate and create backend session
+          </h3>
+          <p className="mt-1 text-xs text-[#aeb9c7]">
+            Choose role, then click Authenticate.
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <label className="text-xs text-[#aeb9c7]" htmlFor="dev-role-select">
+              Role
+            </label>
+            <select
+              id="dev-role-select"
+              value={role}
+              onChange={(event) => setRole(event.target.value as Role)}
+              className="h-10 rounded-md border border-[#2a323d] bg-transparent px-3 text-sm text-[#d8dee9] outline-none"
+            >
+              <option value="institution">Institution</option>
+              <option value="market_maker">MarketMaker</option>
+              <option value="compliance">Compliance</option>
+            </select>
+            <Button onClick={() => void authenticate()} disabled={!connected || authLoading}>
+              {authLoading ? "Authenticating..." : "Authenticate"}
+            </Button>
+            <Button variant="outline" onClick={() => void logout()} disabled={!sessionToken}>
+              Logout Session
+            </Button>
+          </div>
+        </div>
 
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        <Button
-          onClick={() => void initializeUmbra()}
-          disabled={!sessionToken || umbraLoading}
-        >
-          {umbraLoading ? "Initializing Umbra..." : "Initialize Umbra Account"}
-        </Button>
+        <div className="rounded-lg border border-[#2a323d] p-4">
+          <h3 className="text-sm font-semibold text-white">
+            Step 3: Initialize Umbra account
+          </h3>
+          <p className="mt-1 text-xs text-[#aeb9c7]">
+            Click once. Wait until Umbra status becomes <code>initialized</code>.
+          </p>
+          <div className="mt-3">
+            <Button
+              onClick={() => void initializeUmbra()}
+              disabled={!sessionToken || umbraLoading}
+            >
+              {umbraLoading ? "Initializing Umbra..." : "Initialize Umbra Account"}
+            </Button>
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-[#2a323d] p-4">
+          <h3 className="text-sm font-semibold text-white">
+            Step 4: Create encrypted RFQ and watch realtime events
+          </h3>
+          <p className="mt-1 text-xs text-[#aeb9c7]">
+            Payload is encrypted in-browser before API submit.
+          </p>
+
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-[#aeb9c7]" htmlFor="rfq-pair-input">
+                Pair (BASE/QUOTE)
+              </label>
+              <input
+                id="rfq-pair-input"
+                value={rfqPair}
+                onChange={(event) => setRfqPair(event.target.value.toUpperCase())}
+                placeholder="SOL/USDC"
+                className="h-10 rounded-md border border-[#2a323d] bg-transparent px-3 text-sm text-[#d8dee9] outline-none"
+              />
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-[#aeb9c7]" htmlFor="rfq-side-select">
+                Side
+              </label>
+              <select
+                id="rfq-side-select"
+                value={rfqSide}
+                onChange={(event) => setRfqSide(event.target.value as RfqSide)}
+                className="h-10 rounded-md border border-[#2a323d] bg-transparent px-3 text-sm text-[#d8dee9] outline-none"
+              >
+                <option value="buy">Buy</option>
+                <option value="sell">Sell</option>
+              </select>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-[#aeb9c7]" htmlFor="rfq-notional-input">
+                Notional Size
+              </label>
+              <input
+                id="rfq-notional-input"
+                value={rfqNotionalSize}
+                onChange={(event) => setRfqNotionalSize(event.target.value)}
+                placeholder="1000"
+                className="h-10 rounded-md border border-[#2a323d] bg-transparent px-3 text-sm text-[#d8dee9] outline-none"
+              />
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-[#aeb9c7]" htmlFor="rfq-min-fill-input">
+                Min Fill Size
+              </label>
+              <input
+                id="rfq-min-fill-input"
+                value={rfqMinFillSize}
+                onChange={(event) => setRfqMinFillSize(event.target.value)}
+                placeholder="500"
+                className="h-10 rounded-md border border-[#2a323d] bg-transparent px-3 text-sm text-[#d8dee9] outline-none"
+              />
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-[#aeb9c7]" htmlFor="rfq-expiry-input">
+                Expiry (minutes)
+              </label>
+              <input
+                id="rfq-expiry-input"
+                value={rfqExpiryMinutes}
+                onChange={(event) => setRfqExpiryMinutes(event.target.value)}
+                placeholder="2"
+                className="h-10 rounded-md border border-[#2a323d] bg-transparent px-3 text-sm text-[#d8dee9] outline-none"
+              />
+            </div>
+
+            <div className="flex flex-col gap-1 md:col-span-2">
+              <label className="text-xs text-[#aeb9c7]" htmlFor="rfq-counterparties-input">
+                Counterparty Wallets (comma or newline separated)
+              </label>
+              <textarea
+                id="rfq-counterparties-input"
+                value={rfqCounterparties}
+                onChange={(event) => setRfqCounterparties(event.target.value)}
+                rows={3}
+                placeholder="Enter at least one Solana wallet address"
+                className="rounded-md border border-[#2a323d] bg-transparent px-3 py-2 text-sm text-[#d8dee9] outline-none"
+              />
+            </div>
+          </div>
+
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <Button onClick={() => void createRfq()} disabled={!sessionToken || rfqLoading}>
+              {rfqLoading ? "Creating RFQ..." : "Create Encrypted RFQ"}
+            </Button>
+            <span className="text-xs text-[#aeb9c7]">
+              Websocket: <span className="font-medium text-[#d8dee9]">{wsState}</span>
+            </span>
+          </div>
+
+          {rfqCreated ? (
+            <p className="mt-3 text-sm text-[#6ee7d7]">
+              Created RFQ {rfqCreated.id.slice(0, 8)}... ({rfqCreated.pair}, {rfqCreated.side})
+            </p>
+          ) : null}
+          {rfqError ? <p className="mt-3 text-sm text-red-300">{rfqError}</p> : null}
+
+          <div className="mt-4 rounded-md border border-[#2a323d] bg-[#0e141d] p-3">
+            <p className="text-xs font-semibold text-white">RFQ Realtime Events (latest 10)</p>
+            <div className="mt-2 space-y-1 text-xs text-[#aeb9c7]">
+              {wsEvents.length === 0 ? <p>No events yet.</p> : null}
+              {wsEvents.map((line, index) => (
+                <p key={`${line}-${index}`}>{line}</p>
+              ))}
+            </div>
+          </div>
+        </div>
       </div>
 
       <p className="mt-4 text-sm text-[#aeb9c7]">

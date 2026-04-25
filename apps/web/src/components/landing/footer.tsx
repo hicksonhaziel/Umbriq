@@ -12,6 +12,7 @@ export function Footer() {
               width={40}
               height={40}
               className="rounded"
+              style={{ height: "auto" }}
             />
             <span className="text-lg font-bold text-white">Umbriq</span>
           </div>
@@ -63,4 +64,3 @@ export function Footer() {
     </footer>
   );
 }
-

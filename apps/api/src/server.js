@@ -2,11 +2,15 @@ const { randomUUID } = require("node:crypto");
 const fastify = require("fastify");
 const cors = require("@fastify/cors");
 const fastifyRedis = require("@fastify/redis");
+const fastifyWebsocket = require("@fastify/websocket");
 const { PublicKey } = require("@solana/web3.js");
 const bs58 = require("bs58");
 const nacl = require("tweetnacl");
 const { buildAuthMessage } = require("./lib/auth-message");
 const { InMemorySessionStore, RedisSessionStore } = require("./lib/session-store");
+const { validateRfqCreatePayload } = require("./lib/rfq-validation");
+const { InMemoryRfqStore, createPostgresRfqStore } = require("./lib/rfq-store");
+const { RfqRealtimeHub } = require("./lib/rfq-realtime");
 const {
   VALID_UMBRA_STATUS,
   InMemoryUmbraAccountStore,
@@ -32,6 +36,25 @@ function getAuthToken(request) {
   return null;
 }
 
+function resolveWebsocketConnection(connection) {
+  if (connection && typeof connection.send === "function") {
+    return connection;
+  }
+  if (connection && connection.socket && typeof connection.socket.send === "function") {
+    return connection.socket;
+  }
+  return null;
+}
+
+function closeWebsocket(socket, code, reason) {
+  if (!socket || typeof socket.close !== "function") {
+    return;
+  }
+  try {
+    socket.close(code, reason);
+  } catch {}
+}
+
 async function buildServer(options = {}) {
   const app = fastify({
     logger: options.logger ?? true,
@@ -40,6 +63,7 @@ async function buildServer(options = {}) {
   await app.register(cors, {
     origin: true,
   });
+  await app.register(fastifyWebsocket);
 
   const nonceStore = new Map();
   const redisUrl = options.redisUrl ?? process.env.REDIS_URL;
@@ -57,6 +81,20 @@ async function buildServer(options = {}) {
   const umbraAccountStore = app.redis
     ? new RedisUmbraAccountStore(app.redis)
     : new InMemoryUmbraAccountStore();
+  const rfqStore = options.rfqStore
+    ? options.rfqStore
+    : options.enablePostgres === false || !(options.databaseUrl || process.env.DATABASE_URL)
+      ? new InMemoryRfqStore()
+      : createPostgresRfqStore({
+          connectionString: options.databaseUrl || process.env.DATABASE_URL,
+        });
+  const rfqRealtimeHub = options.rfqRealtimeHub || new RfqRealtimeHub();
+
+  app.addHook("onClose", async () => {
+    if (typeof rfqStore.close === "function") {
+      await rfqStore.close();
+    }
+  });
 
   async function authenticate(request, reply) {
     const token = getAuthToken(request);
@@ -187,6 +225,72 @@ async function buildServer(options = {}) {
   app.post("/auth/logout", { preHandler: authenticate }, async (request) => {
     await sessionStore.destroy(request.session.token);
     return { ok: true };
+  });
+
+  app.post("/rfqs", { preHandler: authenticate }, async (request, reply) => {
+    const validated = validateRfqCreatePayload(request.body);
+    if (validated.error) {
+      return reply.code(400).send({ error: validated.error });
+    }
+
+    try {
+      const created = await rfqStore.create({
+        institutionWallet: request.session.walletAddress,
+        ...validated.value,
+      });
+      rfqRealtimeHub.broadcastRfqCreated(created);
+      return reply.code(201).send(created);
+    } catch (error) {
+      request.log.error({ error }, "Failed to create RFQ");
+      const detail =
+        error && typeof error.message === "string" ? error.message : "Unknown error";
+      const code = error && typeof error.code === "string" ? error.code : null;
+      return reply.code(500).send({
+        error: "Failed to create RFQ",
+        ...(process.env.NODE_ENV !== "production"
+          ? {
+              detail,
+              code,
+            }
+          : {}),
+      });
+    }
+  });
+
+  app.get("/ws/rfqs", { websocket: true }, async (connection, request) => {
+    const socket = resolveWebsocketConnection(connection);
+
+    const queryToken =
+      request.query && typeof request.query.token === "string"
+        ? request.query.token.trim()
+        : "";
+    const token = queryToken || getAuthToken(request);
+    if (!token) {
+      closeWebsocket(socket, 1008, "Unauthorized");
+      return;
+    }
+
+    const session = await sessionStore.get(token);
+    if (!session) {
+      closeWebsocket(socket, 1008, "Invalid or expired session");
+      return;
+    }
+
+    if (!socket) {
+      request.log.error("Websocket route failed to resolve socket instance");
+      return;
+    }
+
+    rfqRealtimeHub.addClient(socket, session);
+    socket.send(
+      JSON.stringify({
+        event: "rfq.subscribed",
+        payload: {
+          walletAddress: session.walletAddress,
+          role: session.role,
+        },
+      })
+    );
   });
 
   app.get("/umbra/account", { preHandler: authenticate }, async (request) => {

@@ -11,6 +11,7 @@ export function Header() {
             width={45}
             height={45}
             className="rounded"
+            style={{ height: "auto" }}
             priority
           />
           <span className="text-xl font-bold tracking-tight text-white">Umbriq</span>
@@ -38,4 +39,3 @@ export function Header() {
     </nav>
   );
 }
-
