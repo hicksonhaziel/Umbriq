@@ -1,4 +1,4 @@
-const { randomUUID } = require("node:crypto");
+const { randomUUID, createHash } = require("node:crypto");
 const fastify = require("fastify");
 const cors = require("@fastify/cors");
 const fastifyRedis = require("@fastify/redis");
@@ -15,7 +15,12 @@ const { verifyQuoteSignature } = require("./lib/quote-message");
 const { rankQuotes } = require("./lib/quote-ranking");
 const { InMemoryQuoteStore, createPostgresQuoteStore } = require("./lib/quote-store");
 const { QuoteExpiryService } = require("./lib/quote-expiry-service");
-const { validateSettlementAcceptPayload } = require("./lib/settlement-validation");
+const {
+  validateSettlementAcceptPayload,
+  validateSettlementStartPayload,
+  validateSettlementCompletePayload,
+  validateSettlementFailPayload,
+} = require("./lib/settlement-validation");
 const {
   InMemorySettlementStore,
   createPostgresSettlementStore,
@@ -27,6 +32,13 @@ const {
   InMemoryUmbraAccountStore,
   RedisUmbraAccountStore,
 } = require("./lib/umbra-account-store");
+const {
+  isSupportedUmbraNetwork,
+  resolveUmbraNetwork,
+  getUmbraNetworkConfig,
+  getAllUmbraNetworkConfigs,
+  decimalToBaseUnits,
+} = require("./lib/umbra-network-config");
 
 const VALID_ROLES = ["institution", "market_maker", "compliance"];
 const VALID_QUOTE_STATUSES = ["active", "expired", "rejected", "accepted", "withdrawn"];
@@ -71,6 +83,117 @@ function closeWebsocket(socket, code, reason) {
 function toNumber(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : NaN;
+}
+
+function getRequestedNetwork(value) {
+  return resolveUmbraNetwork(typeof value === "string" ? value.trim() : undefined);
+}
+
+function isObjectRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function buildSettlementProofDigest(payload) {
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+function validateSettlementExecutionResult({
+  settlement,
+  institutionWallet,
+  quote,
+  network,
+  umbraTxSignature,
+  receipt,
+  proof,
+}) {
+  if (!isSupportedUmbraNetwork(network)) {
+    return `Unsupported settlement network: ${network}`;
+  }
+
+  if (typeof umbraTxSignature !== "string" || umbraTxSignature.trim().length === 0) {
+    return "umbraTxSignature is required";
+  }
+
+  if (!isObjectRecord(receipt)) {
+    return "receipt must be an object";
+  }
+
+  if (!isObjectRecord(proof)) {
+    return "proof must be an object";
+  }
+
+  const networkConfig = getUmbraNetworkConfig(network);
+  const expectedAmountBaseUnits = decimalToBaseUnits(
+    quote.guaranteedSize,
+    networkConfig.mintDecimals
+  );
+
+  if (receipt.provider !== "umbra-sdk") {
+    return "receipt.provider must be umbra-sdk";
+  }
+  if (receipt.executionModel !== "browser") {
+    return "receipt.executionModel must be browser";
+  }
+  if (receipt.network !== network) {
+    return "receipt.network does not match the selected settlement network";
+  }
+  if (receipt.signerAddress !== institutionWallet) {
+    return "receipt.signerAddress must match the authenticated institution wallet";
+  }
+  if (receipt.destinationAddress !== quote.marketMakerWallet) {
+    return "receipt.destinationAddress must match the accepted market maker wallet";
+  }
+  if (receipt.mint !== networkConfig.mint) {
+    return "receipt.mint does not match the configured settlement mint for this network";
+  }
+  if (Number(receipt.mintDecimals) !== Number(networkConfig.mintDecimals)) {
+    return "receipt.mintDecimals does not match the configured settlement mint decimals";
+  }
+  if (String(receipt.amountBaseUnits) !== String(expectedAmountBaseUnits)) {
+    return "receipt.amountBaseUnits does not match the accepted quote size";
+  }
+
+  if (proof.type !== "umbra-settlement-proof-v1") {
+    return "proof.type must be umbra-settlement-proof-v1";
+  }
+  if (proof.hashAlgorithm !== "sha256") {
+    return "proof.hashAlgorithm must be sha256";
+  }
+  if (!isObjectRecord(proof.payload)) {
+    return "proof.payload must be an object";
+  }
+
+  const expectedDigest = buildSettlementProofDigest(proof.payload);
+  if (proof.digest !== expectedDigest) {
+    return "proof.digest does not match proof.payload";
+  }
+
+  if (proof.payload.network !== network) {
+    return "proof payload network does not match the selected settlement network";
+  }
+  if (proof.payload.settlementId !== settlement.id) {
+    return "proof payload settlementId does not match the settlement";
+  }
+  if (proof.payload.rfqId !== settlement.rfqId) {
+    return "proof payload rfqId does not match the settlement";
+  }
+  if (proof.payload.quoteId !== settlement.quoteId) {
+    return "proof payload quoteId does not match the settlement";
+  }
+  if (proof.payload.mint !== networkConfig.mint) {
+    return "proof payload mint does not match the configured settlement mint";
+  }
+  if (String(proof.payload.amountBaseUnits) !== String(expectedAmountBaseUnits)) {
+    return "proof payload amount does not match the accepted quote size";
+  }
+  if (proof.payload.signerAddress !== institutionWallet) {
+    return "proof payload signerAddress must match the authenticated institution wallet";
+  }
+  if (proof.payload.destinationAddress !== quote.marketMakerWallet) {
+    return "proof payload destinationAddress must match the accepted market maker wallet";
+  }
+
+  return null;
 }
 
 async function buildServer(options = {}) {
@@ -135,9 +258,6 @@ async function buildServer(options = {}) {
     quoteStore,
     rfqStore,
     rfqRealtimeHub,
-    logger: app.log,
-    startDelayMs: options.settlementStartDelayMs ?? 80,
-    confirmDelayMs: options.settlementConfirmDelayMs ?? 160,
   });
   quoteExpiryService.start();
 
@@ -689,7 +809,6 @@ async function buildServer(options = {}) {
           updatedAt: created.updatedAt,
         });
       }
-      void settlementOrchestrationService.run(created.id);
       return reply.code(201).send(created);
     } catch (error) {
       request.log.error({ error }, "Failed to accept quote for settlement");
@@ -711,6 +830,199 @@ async function buildServer(options = {}) {
           : {}),
       });
     }
+  });
+
+  app.post("/settlements/:settlementId/start", { preHandler: authenticate }, async (request, reply) => {
+    if (request.session.role !== "institution") {
+      return reply.code(403).send({
+        error: "Only institution role can start settlement execution",
+      });
+    }
+
+    const settlementId = request.params?.settlementId;
+    if (typeof settlementId !== "string" || settlementId.trim().length === 0) {
+      return reply.code(400).send({
+        error: "settlementId is required",
+      });
+    }
+
+    const validated = validateSettlementStartPayload(request.body);
+    if (validated.error) {
+      return reply.code(400).send({ error: validated.error });
+    }
+
+    const network = validated.value.network;
+    if (!isSupportedUmbraNetwork(network)) {
+      return reply.code(400).send({
+        error: "network must be devnet or mainnet",
+      });
+    }
+
+    const settlement = await settlementStore.getById(settlementId.trim());
+    if (!settlement) {
+      return reply.code(404).send({ error: "Settlement not found" });
+    }
+
+    const rfq = await rfqStore.getById(settlement.rfqId);
+    const quote = await quoteStore.getById(settlement.quoteId);
+    if (!rfq || !quote) {
+      return reply.code(404).send({ error: "Settlement dependencies not found" });
+    }
+
+    if (rfq.institutionWallet !== request.session.walletAddress) {
+      return reply.code(403).send({
+        error: "Institutions can only start their own settlements",
+      });
+    }
+
+    if (!["accepted", "failed"].includes(settlement.status)) {
+      return reply.code(409).send({
+        error: `Settlement cannot be started from status ${settlement.status}`,
+      });
+    }
+
+    const started = await settlementOrchestrationService.start(settlement.id);
+    return reply.send({
+      ...started,
+      executionModel: "browser",
+      network,
+      rfq: {
+        id: rfq.id,
+        institutionWallet: rfq.institutionWallet,
+        pair: rfq.pair,
+        side: rfq.side,
+        status: rfq.status,
+        quoteExpiresAt: rfq.quoteExpiresAt,
+      },
+      quote: {
+        id: quote.id,
+        marketMakerWallet: quote.marketMakerWallet,
+        allInPrice: quote.allInPrice,
+        guaranteedSize: quote.guaranteedSize,
+        status: quote.status,
+        validUntil: quote.validUntil,
+      },
+    });
+  });
+
+  app.post("/settlements/:settlementId/complete", { preHandler: authenticate }, async (request, reply) => {
+    if (request.session.role !== "institution") {
+      return reply.code(403).send({
+        error: "Only institution role can complete settlement execution",
+      });
+    }
+
+    const settlementId = request.params?.settlementId;
+    if (typeof settlementId !== "string" || settlementId.trim().length === 0) {
+      return reply.code(400).send({
+        error: "settlementId is required",
+      });
+    }
+
+    const validated = validateSettlementCompletePayload(request.body);
+    if (validated.error) {
+      return reply.code(400).send({ error: validated.error });
+    }
+
+    const settlement = await settlementStore.getById(settlementId.trim());
+    if (!settlement) {
+      return reply.code(404).send({ error: "Settlement not found" });
+    }
+
+    const rfq = await rfqStore.getById(settlement.rfqId);
+    const quote = await quoteStore.getById(settlement.quoteId);
+    if (!rfq || !quote) {
+      return reply.code(404).send({ error: "Settlement dependencies not found" });
+    }
+
+    if (rfq.institutionWallet !== request.session.walletAddress) {
+      return reply.code(403).send({
+        error: "Institutions can only complete their own settlements",
+      });
+    }
+
+    if (settlement.status !== "settling") {
+      return reply.code(409).send({
+        error: `Settlement cannot be completed from status ${settlement.status}`,
+      });
+    }
+
+    const verificationError = validateSettlementExecutionResult({
+      settlement,
+      institutionWallet: request.session.walletAddress,
+      quote,
+      network: validated.value.network,
+      umbraTxSignature: validated.value.umbraTxSignature,
+      receipt: validated.value.receipt,
+      proof: validated.value.proof,
+    });
+    if (verificationError) {
+      return reply.code(400).send({ error: verificationError });
+    }
+
+    const completed = await settlementOrchestrationService.complete(settlement.id, {
+      umbraTxSignature: validated.value.umbraTxSignature,
+      receipt: validated.value.receipt,
+      proof: validated.value.proof,
+    });
+    return reply.send(completed);
+  });
+
+  app.post("/settlements/:settlementId/fail", { preHandler: authenticate }, async (request, reply) => {
+    if (request.session.role !== "institution") {
+      return reply.code(403).send({
+        error: "Only institution role can fail settlement execution",
+      });
+    }
+
+    const settlementId = request.params?.settlementId;
+    if (typeof settlementId !== "string" || settlementId.trim().length === 0) {
+      return reply.code(400).send({
+        error: "settlementId is required",
+      });
+    }
+
+    const validated = validateSettlementFailPayload(request.body);
+    if (validated.error) {
+      return reply.code(400).send({ error: validated.error });
+    }
+
+    if (!isSupportedUmbraNetwork(validated.value.network)) {
+      return reply.code(400).send({
+        error: "network must be devnet or mainnet",
+      });
+    }
+
+    const settlement = await settlementStore.getById(settlementId.trim());
+    if (!settlement) {
+      return reply.code(404).send({ error: "Settlement not found" });
+    }
+
+    const rfq = await rfqStore.getById(settlement.rfqId);
+    if (!rfq) {
+      return reply.code(404).send({ error: "Settlement RFQ not found" });
+    }
+
+    if (rfq.institutionWallet !== request.session.walletAddress) {
+      return reply.code(403).send({
+        error: "Institutions can only fail their own settlements",
+      });
+    }
+
+    if (!["accepted", "settling", "failed"].includes(settlement.status)) {
+      return reply.code(409).send({
+        error: `Settlement cannot be marked failed from status ${settlement.status}`,
+      });
+    }
+
+    const failed = await settlementOrchestrationService.fail(settlement.id, {
+      errorMessage: validated.value.errorMessage,
+      failure: {
+        ...validated.value.failure,
+        network: validated.value.network,
+      },
+    });
+    return reply.send(failed);
   });
 
   app.get("/settlements/:settlementId", { preHandler: authenticate }, async (request, reply) => {
@@ -775,6 +1087,27 @@ async function buildServer(options = {}) {
     };
   });
 
+  app.get("/settlements/config", { preHandler: authenticate }, async (request) => {
+    if (
+      !["institution", "market_maker", "compliance"].includes(request.session.role)
+    ) {
+      return {
+        executionModel: "unknown",
+        ready: false,
+        issues: ["Unauthorized role"],
+      };
+    }
+
+    return {
+      executionModel: "browser",
+      provider: "umbra-sdk",
+      ready: true,
+      defaultNetwork: "devnet",
+      supportedNetworks: getAllUmbraNetworkConfigs(),
+      issues: [],
+    };
+  });
+
   app.get("/ws/rfqs", { websocket: true }, async (connection, request) => {
     const socket = resolveWebsocketConnection(connection);
 
@@ -812,9 +1145,11 @@ async function buildServer(options = {}) {
   });
 
   app.get("/umbra/account", { preHandler: authenticate }, async (request) => {
+    const network = getRequestedNetwork(request.query?.network);
     const state = await umbraAccountStore.get(
       request.session.walletAddress,
-      request.session.role
+      request.session.role,
+      network
     );
     return state;
   });
@@ -832,12 +1167,13 @@ async function buildServer(options = {}) {
       });
     }
 
+    const selectedNetwork = getRequestedNetwork(network);
     const updated = await umbraAccountStore.upsert(
       request.session.walletAddress,
       request.session.role,
       {
         status,
-        network: typeof network === "string" ? network : "devnet",
+        network: selectedNetwork,
         registrationSignatures: Array.isArray(registrationSignatures)
           ? registrationSignatures.filter((value) => typeof value === "string")
           : [],
@@ -857,7 +1193,8 @@ async function buildServer(options = {}) {
               }
             : null,
         lastError: typeof lastError === "string" ? lastError : null,
-      }
+      },
+      selectedNetwork
     );
 
     return updated;
@@ -865,9 +1202,11 @@ async function buildServer(options = {}) {
 
   app.get("/dashboard", { preHandler: authenticate }, async (request) => {
     const role = request.session.role;
+    const network = getRequestedNetwork(request.query?.network);
     const umbraAccount = await umbraAccountStore.get(
       request.session.walletAddress,
-      request.session.role
+      request.session.role,
+      network
     );
     const umbraReady = umbraAccount.status === "initialized";
     const viewByRole = {
@@ -881,6 +1220,7 @@ async function buildServer(options = {}) {
       role,
       view: umbraReady ? viewByRole[role] : "Complete Umbra initialization",
       umbraReady,
+      network,
       umbraStatus: umbraAccount.status,
     };
   });

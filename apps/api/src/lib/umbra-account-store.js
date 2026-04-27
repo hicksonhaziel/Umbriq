@@ -27,15 +27,19 @@ function buildDefaultState(walletAddress, role, network = "devnet") {
   };
 }
 
-function normalizeRecord(record, walletAddress, role) {
+function buildStoreKey(walletAddress, network = "devnet") {
+  return `${walletAddress}:${network}`;
+}
+
+function normalizeRecord(record, walletAddress, role, network = "devnet") {
   if (!record || typeof record !== "object") {
-    return buildDefaultState(walletAddress, role);
+    return buildDefaultState(walletAddress, role, network);
   }
 
   return {
     walletAddress,
     role,
-    network: typeof record.network === "string" ? record.network : "devnet",
+    network: typeof record.network === "string" ? record.network : network,
     status: normalizeUmbraStatus(record.status),
     registrationSignatures: Array.isArray(record.registrationSignatures)
       ? record.registrationSignatures.filter((value) => typeof value === "string")
@@ -66,13 +70,13 @@ class InMemoryUmbraAccountStore {
     this.records = new Map();
   }
 
-  async get(walletAddress, role) {
-    const existing = this.records.get(walletAddress);
-    return normalizeRecord(existing, walletAddress, role);
+  async get(walletAddress, role, network = "devnet") {
+    const existing = this.records.get(buildStoreKey(walletAddress, network));
+    return normalizeRecord(existing, walletAddress, role, network);
   }
 
-  async upsert(walletAddress, role, patch) {
-    const current = await this.get(walletAddress, role);
+  async upsert(walletAddress, role, patch, network = patch?.network || "devnet") {
+    const current = await this.get(walletAddress, role, network);
     const next = normalizeRecord(
       {
         ...current,
@@ -81,9 +85,10 @@ class InMemoryUmbraAccountStore {
         updatedAt: Date.now(),
       },
       walletAddress,
-      role
+      role,
+      network
     );
-    this.records.set(walletAddress, next);
+    this.records.set(buildStoreKey(walletAddress, next.network), next);
     return next;
   }
 }
@@ -93,10 +98,12 @@ class RedisUmbraAccountStore {
     this.redis = redis;
   }
 
-  async get(walletAddress, role) {
-    const value = await this.redis.get(`${UMBRA_ACCOUNT_PREFIX}${walletAddress}`);
+  async get(walletAddress, role, network = "devnet") {
+    const value = await this.redis.get(
+      `${UMBRA_ACCOUNT_PREFIX}${buildStoreKey(walletAddress, network)}`
+    );
     if (!value) {
-      return buildDefaultState(walletAddress, role);
+      return buildDefaultState(walletAddress, role, network);
     }
 
     let parsed;
@@ -105,11 +112,11 @@ class RedisUmbraAccountStore {
     } catch {
       parsed = null;
     }
-    return normalizeRecord(parsed, walletAddress, role);
+    return normalizeRecord(parsed, walletAddress, role, network);
   }
 
-  async upsert(walletAddress, role, patch) {
-    const current = await this.get(walletAddress, role);
+  async upsert(walletAddress, role, patch, network = patch?.network || "devnet") {
+    const current = await this.get(walletAddress, role, network);
     const next = normalizeRecord(
       {
         ...current,
@@ -118,9 +125,13 @@ class RedisUmbraAccountStore {
         updatedAt: Date.now(),
       },
       walletAddress,
-      role
+      role,
+      network
     );
-    await this.redis.set(`${UMBRA_ACCOUNT_PREFIX}${walletAddress}`, JSON.stringify(next));
+    await this.redis.set(
+      `${UMBRA_ACCOUNT_PREFIX}${buildStoreKey(walletAddress, next.network)}`,
+      JSON.stringify(next)
+    );
     return next;
   }
 }

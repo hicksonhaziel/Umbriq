@@ -25,6 +25,81 @@ function validateSettlementAcceptPayload(payload) {
   };
 }
 
+function validateSettlementStartPayload(payload) {
+  if (typeof payload?.network !== "string" || payload.network.trim().length === 0) {
+    return {
+      error: "network is required",
+    };
+  }
+
+  return {
+    value: {
+      network: payload.network.trim(),
+    },
+  };
+}
+
+function validateSettlementCompletePayload(payload) {
+  if (typeof payload?.network !== "string" || payload.network.trim().length === 0) {
+    return {
+      error: "network is required",
+    };
+  }
+
+  if (typeof payload?.umbraTxSignature !== "string" || payload.umbraTxSignature.trim().length === 0) {
+    return {
+      error: "umbraTxSignature is required",
+    };
+  }
+
+  if (!payload.receipt || typeof payload.receipt !== "object") {
+    return {
+      error: "receipt is required",
+    };
+  }
+
+  if (!payload.proof || typeof payload.proof !== "object") {
+    return {
+      error: "proof is required",
+    };
+  }
+
+  return {
+    value: {
+      network: payload.network.trim(),
+      umbraTxSignature: payload.umbraTxSignature.trim(),
+      receipt: payload.receipt,
+      proof: payload.proof,
+    },
+  };
+}
+
+function validateSettlementFailPayload(payload) {
+  if (typeof payload?.network !== "string" || payload.network.trim().length === 0) {
+    return {
+      error: "network is required",
+    };
+  }
+
+  if (typeof payload?.errorMessage !== "string" || payload.errorMessage.trim().length === 0) {
+    return {
+      error: "errorMessage is required",
+    };
+  }
+
+  return {
+    value: {
+      network: payload.network.trim(),
+      errorMessage: payload.errorMessage.trim(),
+      failure:
+        payload.failure && typeof payload.failure === "object" ? payload.failure : {},
+    },
+  };
+}
+
 module.exports = {
   validateSettlementAcceptPayload,
+  validateSettlementStartPayload,
+  validateSettlementCompletePayload,
+  validateSettlementFailPayload,
 };

@@ -26,6 +26,9 @@ importers:
       '@solana/web3.js':
         specifier: ^1.98.4
         version: 1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
+      '@umbra-privacy/sdk':
+        specifier: ^4.0.0
+        version: 4.0.0(@wallet-standard/core@1.1.1)(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
       bs58:
         specifier: ^6.0.0
         version: 6.0.0
@@ -64,7 +67,7 @@ importers:
         version: 1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
       '@umbra-privacy/sdk':
         specifier: ^4.0.0
-        version: 4.0.0(@wallet-standard/core@1.1.1)(bufferutil@4.1.0)(typescript@5.9.3)
+        version: 4.0.0(@wallet-standard/core@1.1.1)(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
       '@wallet-standard/core':
         specifier: ^1.1.1
         version: 1.1.1
@@ -4360,11 +4363,11 @@ snapshots:
 
   '@solana-program/system@0.11.0(@solana/kit@6.8.0(bufferutil@4.1.0)(typescript@5.9.3))':
     dependencies:
-      '@solana/kit': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)
+      '@solana/kit': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
 
   '@solana-program/token-2022@0.9.0(@solana/kit@6.8.0(bufferutil@4.1.0)(typescript@5.9.3))(@solana/sysvars@6.8.0(typescript@5.9.3))':
     dependencies:
-      '@solana/kit': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)
+      '@solana/kit': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
       '@solana/sysvars': 6.8.0(typescript@5.9.3)
 
   '@solana/accounts@6.8.0(typescript@5.9.3)':
@@ -4508,7 +4511,7 @@ snapshots:
     transitivePeerDependencies:
       - fastestsmallesttextencoderdecoder
 
-  '@solana/kit@6.8.0(bufferutil@4.1.0)(typescript@5.9.3)':
+  '@solana/kit@6.8.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)':
     dependencies:
       '@solana/accounts': 6.8.0(typescript@5.9.3)
       '@solana/addresses': 6.8.0(typescript@5.9.3)
@@ -4527,12 +4530,12 @@ snapshots:
       '@solana/rpc-api': 6.8.0(typescript@5.9.3)
       '@solana/rpc-parsed-types': 6.8.0(typescript@5.9.3)
       '@solana/rpc-spec-types': 6.8.0(typescript@5.9.3)
-      '@solana/rpc-subscriptions': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)
+      '@solana/rpc-subscriptions': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
       '@solana/rpc-types': 6.8.0(typescript@5.9.3)
       '@solana/signers': 6.8.0(typescript@5.9.3)
       '@solana/subscribable': 6.8.0(typescript@5.9.3)
       '@solana/sysvars': 6.8.0(typescript@5.9.3)
-      '@solana/transaction-confirmation': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)
+      '@solana/transaction-confirmation': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
       '@solana/transaction-messages': 6.8.0(typescript@5.9.3)
       '@solana/transactions': 6.8.0(typescript@5.9.3)
     optionalDependencies:
@@ -4667,7 +4670,7 @@ snapshots:
     transitivePeerDependencies:
       - fastestsmallesttextencoderdecoder
 
-  '@solana/rpc-subscriptions-channel-websocket@6.8.0(bufferutil@4.1.0)(typescript@5.9.3)':
+  '@solana/rpc-subscriptions-channel-websocket@6.8.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)':
     dependencies:
       '@solana/errors': 6.8.0(typescript@5.9.3)
       '@solana/functional': 6.8.0(typescript@5.9.3)
@@ -4689,7 +4692,7 @@ snapshots:
     optionalDependencies:
       typescript: 5.9.3
 
-  '@solana/rpc-subscriptions@6.8.0(bufferutil@4.1.0)(typescript@5.9.3)':
+  '@solana/rpc-subscriptions@6.8.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)':
     dependencies:
       '@solana/errors': 6.8.0(typescript@5.9.3)
       '@solana/fast-stable-stringify': 6.8.0(typescript@5.9.3)
@@ -4697,7 +4700,7 @@ snapshots:
       '@solana/promises': 6.8.0(typescript@5.9.3)
       '@solana/rpc-spec-types': 6.8.0(typescript@5.9.3)
       '@solana/rpc-subscriptions-api': 6.8.0(typescript@5.9.3)
-      '@solana/rpc-subscriptions-channel-websocket': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)
+      '@solana/rpc-subscriptions-channel-websocket': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
       '@solana/rpc-subscriptions-spec': 6.8.0(typescript@5.9.3)
       '@solana/rpc-transformers': 6.8.0(typescript@5.9.3)
       '@solana/rpc-types': 6.8.0(typescript@5.9.3)
@@ -4794,7 +4797,7 @@ snapshots:
     transitivePeerDependencies:
       - fastestsmallesttextencoderdecoder
 
-  '@solana/transaction-confirmation@6.8.0(bufferutil@4.1.0)(typescript@5.9.3)':
+  '@solana/transaction-confirmation@6.8.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)':
     dependencies:
       '@solana/addresses': 6.8.0(typescript@5.9.3)
       '@solana/codecs-strings': 6.8.0(typescript@5.9.3)
@@ -4802,7 +4805,7 @@ snapshots:
       '@solana/keys': 6.8.0(typescript@5.9.3)
       '@solana/promises': 6.8.0(typescript@5.9.3)
       '@solana/rpc': 6.8.0(typescript@5.9.3)
-      '@solana/rpc-subscriptions': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)
+      '@solana/rpc-subscriptions': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
       '@solana/rpc-types': 6.8.0(typescript@5.9.3)
       '@solana/transaction-messages': 6.8.0(typescript@5.9.3)
       '@solana/transactions': 6.8.0(typescript@5.9.3)
@@ -5198,10 +5201,10 @@ snapshots:
       '@typescript-eslint/types': 8.58.2
       eslint-visitor-keys: 5.0.1
 
-  '@umbra-privacy/arcium-codama@2.0.1(bufferutil@4.1.0)(typescript@5.9.3)':
+  '@umbra-privacy/arcium-codama@2.0.1(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)':
     dependencies:
       '@solana-program/system': 0.11.0(@solana/kit@6.8.0(bufferutil@4.1.0)(typescript@5.9.3))
-      '@solana/kit': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)
+      '@solana/kit': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
       '@solana/sysvars': 6.8.0(typescript@5.9.3)
     transitivePeerDependencies:
       - bufferutil
@@ -5218,16 +5221,16 @@ snapshots:
       '@bufbuild/protobuf': 2.11.0
       '@umbra-privacy/indexer-proto-gen': 2.0.1
 
-  '@umbra-privacy/sdk@4.0.0(@wallet-standard/core@1.1.1)(bufferutil@4.1.0)(typescript@5.9.3)':
+  '@umbra-privacy/sdk@4.0.0(@wallet-standard/core@1.1.1)(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)':
     dependencies:
       '@noble/ciphers': 2.2.0
       '@noble/curves': 2.2.0
       '@noble/hashes': 2.2.0
-      '@solana/kit': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)
+      '@solana/kit': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
       '@solana/wallet-standard-features': 1.3.0
-      '@umbra-privacy/arcium-codama': 2.0.1(bufferutil@4.1.0)(typescript@5.9.3)
+      '@umbra-privacy/arcium-codama': 2.0.1(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
       '@umbra-privacy/indexer-read-service-client': 2.0.1
-      '@umbra-privacy/umbra-codama': 2.0.2(bufferutil@4.1.0)(typescript@5.9.3)
+      '@umbra-privacy/umbra-codama': 2.0.2(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
     optionalDependencies:
       '@wallet-standard/core': 1.1.1
     transitivePeerDependencies:
@@ -5236,11 +5239,11 @@ snapshots:
       - typescript
       - utf-8-validate
 
-  '@umbra-privacy/umbra-codama@2.0.2(bufferutil@4.1.0)(typescript@5.9.3)':
+  '@umbra-privacy/umbra-codama@2.0.2(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)':
     dependencies:
       '@solana-program/system': 0.11.0(@solana/kit@6.8.0(bufferutil@4.1.0)(typescript@5.9.3))
       '@solana-program/token-2022': 0.9.0(@solana/kit@6.8.0(bufferutil@4.1.0)(typescript@5.9.3))(@solana/sysvars@6.8.0(typescript@5.9.3))
-      '@solana/kit': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)
+      '@solana/kit': 6.8.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
       '@solana/sysvars': 6.8.0(typescript@5.9.3)
     transitivePeerDependencies:
       - bufferutil

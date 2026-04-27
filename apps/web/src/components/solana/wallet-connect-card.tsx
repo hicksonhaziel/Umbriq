@@ -5,8 +5,10 @@ import dynamic from "next/dynamic";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { LAMPORTS_PER_SOL } from "@solana/web3.js";
 import bs58 from "bs58";
+import { useUmbraNetwork } from "@/components/solana/wallet-provider";
 import { initializeUmbraAccount, type UmbraAccountState } from "@/lib/umbra/client";
 import { encryptRfqPayload } from "@/lib/rfq/encryption";
+import { getUmbraNetworkConfig } from "@/lib/umbra/network-config";
 import { Button } from "@/components/ui/button";
 
 type Role = "institution" | "market_maker" | "compliance";
@@ -65,6 +67,7 @@ const WalletMultiButtonNoSsr = dynamic(
 export function WalletConnectCard() {
   const { connection } = useConnection();
   const { connected, connecting, disconnect, publicKey, signMessage } = useWallet();
+  const { network: selectedNetwork } = useUmbraNetwork();
   const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:4000";
   const [balanceSol, setBalanceSol] = useState<number | null>(null);
   const [loadingBalance, setLoadingBalance] = useState(false);
@@ -75,7 +78,6 @@ export function WalletConnectCard() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [dashboardView, setDashboardView] = useState<string | null>(null);
   const [umbraStatus, setUmbraStatus] = useState<UmbraStatus>("not_initialized");
-  const [umbraNetwork, setUmbraNetwork] = useState("devnet");
   const [umbraSignatures, setUmbraSignatures] = useState<string[]>([]);
   const [umbraAccountState, setUmbraAccountState] = useState<UmbraAccountState>(null);
   const [umbraLoading, setUmbraLoading] = useState(false);
@@ -92,6 +94,10 @@ export function WalletConnectCard() {
   const [rfqCopyState, setRfqCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const [wsState, setWsState] = useState<WsConnectionState>("disconnected");
   const [wsEvents, setWsEvents] = useState<string[]>([]);
+  const networkConfig = useMemo(
+    () => getUmbraNetworkConfig(selectedNetwork),
+    [selectedNetwork]
+  );
 
   useEffect(() => {
     if (!sessionToken) {
@@ -214,7 +220,6 @@ export function WalletConnectCard() {
 
   const clearUmbraState = useCallback(() => {
     setUmbraStatus("not_initialized");
-    setUmbraNetwork("devnet");
     setUmbraSignatures([]);
     setUmbraAccountState(null);
     setUmbraError(null);
@@ -222,7 +227,6 @@ export function WalletConnectCard() {
 
   const applyUmbraState = useCallback((state: UmbraStateResponse) => {
     setUmbraStatus(state.status);
-    setUmbraNetwork(state.network || "devnet");
     setUmbraSignatures(
       Array.isArray(state.registrationSignatures) ? state.registrationSignatures : []
     );
@@ -232,31 +236,51 @@ export function WalletConnectCard() {
 
   const fetchDashboard = useCallback(
     async (token: string) => {
-      const dashboardRes = await fetch(`${apiBaseUrl}/dashboard`, {
+      const dashboardRes = await fetch(
+        `${apiBaseUrl}/dashboard?network=${encodeURIComponent(selectedNetwork)}`,
+        {
         headers: { Authorization: `Bearer ${token}` },
-      });
+        }
+      );
       if (!dashboardRes.ok) {
         throw new Error("Failed to load dashboard");
       }
       const dashboardData = await dashboardRes.json();
       setDashboardView(dashboardData.view || null);
     },
-    [apiBaseUrl]
+    [apiBaseUrl, selectedNetwork]
   );
 
   const fetchUmbraState = useCallback(
     async (token: string) => {
-      const umbraRes = await fetch(`${apiBaseUrl}/umbra/account`, {
+      const umbraRes = await fetch(
+        `${apiBaseUrl}/umbra/account?network=${encodeURIComponent(selectedNetwork)}`,
+        {
         headers: { Authorization: `Bearer ${token}` },
-      });
+        }
+      );
       if (!umbraRes.ok) {
         throw new Error("Failed to load Umbra state");
       }
       const umbraData = (await umbraRes.json()) as UmbraStateResponse;
       applyUmbraState(umbraData);
     },
-    [apiBaseUrl, applyUmbraState]
+    [apiBaseUrl, applyUmbraState, selectedNetwork]
   );
+
+  useEffect(() => {
+    if (!sessionToken) {
+      clearUmbraState();
+      setDashboardView(null);
+      return;
+    }
+
+    void Promise.all([fetchUmbraState(sessionToken), fetchDashboard(sessionToken)]).catch(
+      (error) => {
+        setUmbraError(error instanceof Error ? error.message : "Failed to refresh network state");
+      }
+    );
+  }, [clearUmbraState, fetchDashboard, fetchUmbraState, selectedNetwork, sessionToken]);
 
   const refreshBalance = useCallback(async () => {
     if (!publicKey) {
@@ -360,7 +384,7 @@ export function WalletConnectCard() {
           Authorization: `Bearer ${sessionToken}`,
         },
         body: JSON.stringify({
-          network: "devnet",
+          network: selectedNetwork,
           status: "initializing",
           registrationSignatures: [],
           accountState: null,
@@ -368,7 +392,7 @@ export function WalletConnectCard() {
         }),
       });
 
-      const result = await initializeUmbraAccount(publicKey.toBase58());
+      const result = await initializeUmbraAccount(publicKey.toBase58(), selectedNetwork);
 
       const persistRes = await fetch(`${apiBaseUrl}/umbra/account`, {
         method: "POST",
@@ -405,7 +429,7 @@ export function WalletConnectCard() {
           Authorization: `Bearer ${sessionToken}`,
         },
         body: JSON.stringify({
-          network: umbraNetwork,
+          network: selectedNetwork,
           status: "failed",
           registrationSignatures: umbraSignatures,
           accountState: umbraAccountState,
@@ -422,8 +446,8 @@ export function WalletConnectCard() {
     publicKey,
     sessionToken,
     umbraAccountState,
-    umbraNetwork,
     umbraSignatures,
+    selectedNetwork,
   ]);
 
   const createRfq = useCallback(async () => {
@@ -550,8 +574,8 @@ export function WalletConnectCard() {
     <section className="rounded-xl border border-[#2a323d] bg-[#131a22] p-6">
       <h2 className="mb-2 text-xl font-semibold text-white">Dev Flow Test Console</h2>
       <p className="mb-6 text-sm text-[#aeb9c7]">
-        Follow these steps in order. Network:{" "}
-        <span className="text-[#6ee7d7]">Solana Devnet</span>
+        Follow these steps in order. Active network:{" "}
+        <span className="text-[#6ee7d7]">{networkConfig.label}</span>
       </p>
 
       <div className="space-y-4">
@@ -789,7 +813,7 @@ export function WalletConnectCard() {
       <p className="mt-2 text-sm text-[#aeb9c7]">
         Umbra Status:{" "}
         <span className="font-medium text-[#d8dee9]">
-          {umbraStatus} ({umbraNetwork})
+          {umbraStatus} ({selectedNetwork})
         </span>
       </p>
       <p className="mt-2 text-sm text-[#aeb9c7]">

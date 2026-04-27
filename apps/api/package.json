@@ -6,6 +6,7 @@
   "scripts": {
     "db:migrate": "bash ./db/migrate.sh",
     "dev": "node --watch src/index.js",
+    "smoke:settlement:devnet": "node ./scripts/umbra-devnet-settlement-smoke.js",
     "start": "node src/index.js",
     "test:auth": "node --test test/auth.e2e.test.js",
     "test:integration": "node --test test/*.e2e.test.js"
@@ -24,6 +25,7 @@
     "@fastify/redis": "^7.2.0",
     "@fastify/websocket": "^11.2.0",
     "@solana/web3.js": "^1.98.4",
+    "@umbra-privacy/sdk": "^4.0.0",
     "bs58": "^6.0.0",
     "dotenv": "^17.4.2",
     "fastify": "^5.8.5",

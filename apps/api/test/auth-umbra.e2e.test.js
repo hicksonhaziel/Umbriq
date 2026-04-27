@@ -102,5 +102,28 @@ test("auth + Umbra setup integration flow", async () => {
   assert.equal(dashboardRes.json().umbraReady, true);
   assert.equal(dashboardRes.json().view, "Institution dashboard");
 
+  const mainnetUmbraRes = await app.inject({
+    method: "GET",
+    url: "/umbra/account?network=mainnet",
+    headers: {
+      authorization: `Bearer ${token}`,
+    },
+  });
+  assert.equal(mainnetUmbraRes.statusCode, 200);
+  assert.equal(mainnetUmbraRes.json().network, "mainnet");
+  assert.equal(mainnetUmbraRes.json().status, "not_initialized");
+
+  const mainnetDashboardRes = await app.inject({
+    method: "GET",
+    url: "/dashboard?network=mainnet",
+    headers: {
+      authorization: `Bearer ${token}`,
+    },
+  });
+  assert.equal(mainnetDashboardRes.statusCode, 200);
+  assert.equal(mainnetDashboardRes.json().network, "mainnet");
+  assert.equal(mainnetDashboardRes.json().umbraReady, false);
+  assert.equal(mainnetDashboardRes.json().view, "Complete Umbra initialization");
+
   await app.close();
 });
